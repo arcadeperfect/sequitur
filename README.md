@@ -1,5 +1,7 @@
 # sequitur
 
+⚠️ **Work in progress** — not yet in a working state.
+
 A Rust library for identifying and manipulating sequences of files. Geared towards visual effects and animation pipelines, but usable with any numbered file sequences.
 
 This is a Rust port of [pysequitur](https://github.com/arcadeperfect/pysequitur), a Python library by the same author.
