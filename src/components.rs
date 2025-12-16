@@ -43,4 +43,35 @@ impl Components {
         self
     }
 
+    pub fn resolve (
+        self, 
+        prefix: &str, 
+        delimiter: &str,
+        padding: usize,
+        suffix: &str,
+        extension: &str,
+        frame_number: i32
+
+    ) -> ResolvedComponents{
+        ResolvedComponents{
+            prefix: self.prefix.unwrap_or_else(|| prefix.to_string()),
+            delimiter: self.delimiter.unwrap_or_else(|| delimiter.to_string()),
+            padding: self.padding.unwrap_or(padding),
+            suffix: self.suffix.unwrap_or_else(||suffix.to_string()),
+            extension: self.extension.unwrap_or_else(||extension.to_string()),
+            frame_number: self.frame_number.unwrap_or(frame_number)
+        }
+    }
+}
+
+
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedComponents {
+    pub prefix : String,
+    pub delimiter : String,
+    pub padding : usize,
+    pub suffix : String, 
+    pub extension : String,
+    pub frame_number: i32
 }
