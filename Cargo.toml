@@ -2,15 +2,15 @@
 name = "sequitur"
 version = "0.1.0"
 edition = "2021"
-description = "A Rust implementation of the Sequitur algorithm"
+description = "A library for working with numbered file sequences"
 license = "MIT"
+repository = "https://github.com/YOURUSERNAME/sequitur"
+readme = "README.md"
+keywords = ["files", "sequence", "vfx", "rename"]
+categories = ["filesystem"]
 
 [lib]
 name = "sequitur"
 path = "src/lib.rs"
-
-[[bin]]
-name = "sequitur"
-path = "src/main.rs"
 
 [dependencies]
