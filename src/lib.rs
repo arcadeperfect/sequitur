@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationType{
@@ -18,7 +18,7 @@ pub enum SequenceExistence{
 pub struct Components{
     pub prefix: Option<String>,
     pub delimiter: Option<String>,
-    pub padding: Option<usize>
+    pub padding: Option<usize>,
     pub suffix: Option<String>,
     pub frame_number: Option<isize>,
 }
