@@ -1,0 +1,16 @@
+[package]
+name = "sequitur"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust implementation of the Sequitur algorithm"
+license = "MIT"
+
+[lib]
+name = "sequitur"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sequitur"
+path = "src/main.rs"
+
+[dependencies]
