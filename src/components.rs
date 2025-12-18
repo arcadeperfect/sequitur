@@ -43,6 +43,13 @@ impl Components {
         self
     }
 
+    pub fn with_frame_number(&self, frame_number: i32) -> Components {
+        Components {
+            frame_number: Some(frame_number),
+            ..self.clone()
+        }
+    }
+
     // pub fn resolve(
     //     self,
     //     prefix: &str,
@@ -72,4 +79,3 @@ pub struct ResolvedComponents {
     pub extension: String,
     pub frame_number: i32,
 }
-

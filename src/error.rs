@@ -1,10 +1,10 @@
-use thiserror::Error;
 use std::path::PathBuf;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SequenceError {
-    #[error("IO error: {0}")] 
-    Io(#[from]std::io::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 
     #[error("operation would overwrite {} existing file(s)", .0.len())]
     Conflict(Vec<PathBuf>),
@@ -20,4 +20,8 @@ pub enum SequenceError {
 
     #[error("cannot create sequence with no items")]
     EmptySequence,
+
+    #[error("inconsistent {0} across sequence items")]
+    InconsistentProperty(&'static str),
 }
+

@@ -13,6 +13,29 @@ pub struct Item {
 }
 
 impl Item {
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+    pub fn frame_string(&self) -> &str {
+        &self.frame_string
+    }
+
+    pub fn extension(&self) -> &str {
+        &self.extension
+    }
+
+    pub fn delimiter(&self) -> Option<&str> {
+        self.delimiter.as_deref()
+    }
+
+    pub fn suffix(&self) -> Option<&str> {
+        self.suffix.as_deref()
+    }
+
+    pub fn directory(&self) -> Option<&PathBuf> {
+        self.directory.as_ref()
+    }
+
     pub fn filename(&self) -> String {
         let del = self.delimiter.as_deref().unwrap_or("");
         let suf = self.suffix.as_deref().unwrap_or("");
@@ -40,14 +63,11 @@ impl Item {
         self.path().exists()
     }
 
-    pub fn with_components(&self, components: Components, directory: Option<PathBuf>) -> Item{
-
+    pub fn with_components(&self, components: Components, directory: Option<PathBuf>) -> Item {
         let resolved = self.resolve_components(&components);
         let target_dir = directory.or_else(|| self.directory.clone());
         Item::from_resolved(resolved, target_dir)
-
     }
-
 
     fn from_resolved(resolved: ResolvedComponents, directory: Option<PathBuf>) -> Self {
         let padding = resolved.padding;
@@ -121,26 +141,16 @@ impl Item {
         components: Option<Components>,
         directory: Option<PathBuf>,
     ) -> Planned<Item> {
-
-        // let target_dir = directory.or_else(||self.directory.clone());
-        let new_item = if let Some(n) = components {
-            // Item::from_resolved(self.resolve_components(&n), target_dir)
-            self.with_components(n, directory.clone())
-        } else {
-            Item {
-                directory: directory.or_else(||self.directory.clone()),
-                ..self.clone()
-            }
-        };
+        let new_item = self.build_new_item(components, directory);
 
         let mut plan = OperationPlan::new();
         plan.push(FileOperation::Copy {
             source: self.path(),
             destination: new_item.path(),
         });
-        Planned{
+        Planned {
             proposed: new_item,
-            plan
+            plan,
         }
     }
 
@@ -149,26 +159,39 @@ impl Item {
         components: Option<Components>,
         directory: Option<PathBuf>,
     ) -> Planned<Item> {
-
-        // let target_dir = directory.or_else(||self.directory.clone());
-        let new_item = if let Some(n) = components {
-            // Item::from_resolved(self.resolve_components(&n), target_dir)
-            self.with_components(n, directory.clone())
-        } else {
-            Item {
-                directory: directory.or_else(||self.directory.clone()),
-                ..self.clone()
-            }
-        };
+        let new_item = self.build_new_item(components, directory);
 
         let mut plan = OperationPlan::new();
         plan.push(FileOperation::Move {
             source: self.path(),
             destination: new_item.path(),
         });
-        Planned{
+        Planned {
             proposed: new_item,
-            plan
+            plan,
+        }
+    }
+
+    pub fn with_frame_number(&self, frame_number: i32, padding: Option<usize>) -> Planned<Item> {
+        let padding: usize = padding.unwrap_or_else(|| self.padding());
+        let components = Components::new()
+            .frame_number(frame_number)
+            .padding(padding);
+        self.rename(components)
+    }
+
+    pub fn with_padding(&self, padding: usize) -> Planned<Item> {
+        let components = Components::new().padding(padding);
+        self.rename(components)
+    }
+
+    fn build_new_item(&self, components: Option<Components>, directory: Option<PathBuf>) -> Item {
+        match components {
+            Some(c) => self.with_components(c, directory),
+            None => Item {
+                directory: directory.or_else(|| self.directory.clone()),
+                ..self.clone()
+            },
         }
     }
 }
