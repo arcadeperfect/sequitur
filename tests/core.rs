@@ -1,6 +1,6 @@
 //! End-to-end tests for the core round-trip: parse -> group -> plan -> execute.
 
-use sequitur::{Components, FileSequence, Item};
+use sequitur::{Components, FileSequence, Item, ParseResult};
 use std::fs;
 use std::path::PathBuf;
 
@@ -196,4 +196,133 @@ fn execute_reports_conflict_without_force() {
     assert!(matches!(err, sequitur::SequenceError::Conflict(_)));
 
     fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Robust parsing: duplicate-frame splitting + rogue tracking
+// ---------------------------------------------------------------------------
+
+#[test]
+fn splits_anomalous_padding_into_separate_sequences() {
+    // Frames 3 and 4 appear at both padding 3 (dominant) and padding 2.
+    let files = [
+        "render_001.exr",
+        "render_002.exr",
+        "render_003.exr",
+        "render_004.exr",
+        "render_03.exr",
+        "render_04.exr",
+    ];
+    let seqs = FileSequence::from_filenames(&files, 2, None);
+    assert_eq!(seqs.len(), 2);
+
+    // Main sequence: the four nominally-padded frames.
+    assert_eq!(seqs[0].len(), 4);
+    assert_eq!(seqs[0].padding().unwrap(), 3);
+
+    // Anomalous sequence: the two padding-2 frames.
+    assert_eq!(seqs[1].len(), 2);
+    assert_eq!(seqs[1].padding().unwrap(), 2);
+}
+
+#[test]
+fn lone_anomalous_frame_is_dropped() {
+    // Frame 3 is duplicated, but the padding-2 fragment has only one frame,
+    // so it is discarded and a single clean sequence remains.
+    let files = [
+        "render_001.exr",
+        "render_002.exr",
+        "render_003.exr",
+        "render_03.exr",
+    ];
+    let seqs = FileSequence::from_filenames(&files, 2, None);
+    assert_eq!(seqs.len(), 1);
+    assert_eq!(seqs[0].len(), 3);
+    assert_eq!(seqs[0].padding().unwrap(), 3);
+}
+
+#[test]
+fn find_duplicate_frames_orders_nominal_first() {
+    let files = ["a_001.exr", "a_002.exr", "a_003.exr", "a_03.exr"];
+    // Build the raw group via parse to keep all four items together, then
+    // inspect duplicates on a sequence that still holds the clash.
+    let items: Vec<Item> = files
+        .iter()
+        .map(|f| Item::from_filename(f, None).unwrap())
+        .collect();
+    let seq = FileSequence::new(items).unwrap();
+    let dups = seq.find_duplicate_frames();
+    let frame3 = &dups[&3];
+    assert_eq!(frame3.len(), 2);
+    // Nominal padding (3) comes first.
+    assert_eq!(frame3[0].padding(), 3);
+    assert_eq!(frame3[1].padding(), 2);
+}
+
+#[test]
+fn rogues_are_reported() {
+    let files = ["a_001.exr", "a_002.exr", "notes.txt", "README", ".hidden"];
+    let ParseResult { sequences, rogues } = FileSequence::parse_filenames(&files, 2, None);
+    assert_eq!(sequences.len(), 1);
+    assert_eq!(rogues.len(), 2); // dotfile excluded
+    assert!(rogues.contains(&PathBuf::from("notes.txt")));
+    assert!(rogues.contains(&PathBuf::from("README")));
+}
+
+#[test]
+fn rogues_are_prefixed_with_directory() {
+    let files = ["a_001.exr", "a_002.exr", "junk"];
+    let result = FileSequence::parse_filenames(&files, 2, Some(PathBuf::from("/tmp/shots")));
+    assert_eq!(result.rogues, vec![PathBuf::from("/tmp/shots/junk")]);
+}
+
+// ---------------------------------------------------------------------------
+// Ergonomics: indexing, iteration, frame queries, counts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn indexing_and_iteration() {
+    let files = ["seq_001.exr", "seq_002.exr", "seq_004.exr", "seq_005.exr"];
+    let seqs = FileSequence::from_filenames(&files, 2, None);
+    let seq = &seqs[0];
+
+    // Positional indexing, frame-ordered.
+    assert_eq!(seq[0].frame_number(), 1);
+    assert_eq!(seq[3].frame_number(), 5);
+
+    // iter() and IntoIterator for &FileSequence.
+    let via_iter: Vec<i32> = seq.iter().map(|i| i.frame_number()).collect();
+    assert_eq!(via_iter, vec![1, 2, 4, 5]);
+    let via_into: Vec<i32> = (seq).into_iter().map(|i| i.frame_number()).collect();
+    assert_eq!(via_into, via_iter);
+}
+
+#[test]
+fn frame_queries_and_counts() {
+    let files = ["seq_001.exr", "seq_002.exr", "seq_004.exr", "seq_005.exr"];
+    let seq = &FileSequence::from_filenames(&files, 2, None)[0];
+
+    assert!(seq.contains(2));
+    assert!(!seq.contains(3));
+    assert_eq!(seq.get_frame(4).unwrap().frame_number(), 4);
+    assert!(seq.get_frame(3).is_none());
+
+    assert_eq!(seq.actual_frame_count(), 4);
+    assert_eq!(seq.frame_count(), 5); // span 1..=5 includes the missing 3
+    assert_eq!(seq.missing_frames(), vec![3]);
+}
+
+#[test]
+fn frames_returns_inclusive_subrange() {
+    let files = ["seq_001.exr", "seq_002.exr", "seq_003.exr", "seq_004.exr"];
+    let seq = &FileSequence::from_filenames(&files, 2, None)[0];
+
+    let sub = seq.frames(2, 3);
+    assert_eq!(sub.len(), 2);
+    assert_eq!(sub.first_frame(), 2);
+    assert_eq!(sub.last_frame(), 3);
+
+    // Out-of-range request yields an empty (but valid) sequence.
+    let empty = seq.frames(100, 200);
+    assert!(empty.is_empty());
 }

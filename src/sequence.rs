@@ -6,12 +6,24 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, HashSet},
+    ops::Index,
     path::{Path, PathBuf},
 };
 
 #[derive(Debug, Clone)]
 pub struct FileSequence {
     items: Vec<Item>,
+}
+
+/// The outcome of parsing a set of filenames: the sequences that were found,
+/// plus any filenames that could not be parsed as sequence items ("rogues").
+#[derive(Debug, Clone, Default)]
+pub struct ParseResult {
+    /// Sequences discovered, ordered deterministically by grouping key.
+    pub sequences: Vec<FileSequence>,
+    /// Paths of files that did not parse (no frame number). Dotfiles are not
+    /// included here — they are skipped silently.
+    pub rogues: Vec<PathBuf>,
 }
 
 impl FileSequence {
@@ -23,23 +35,27 @@ impl FileSequence {
         }
     }
 
-    /// Parses a list of bare filenames and groups them into sequences.
+    /// Parses a list of bare filenames into sequences, also reporting any
+    /// names that could not be parsed.
     ///
     /// Filenames are grouped by `(prefix, delimiter, suffix, extension)`; each
     /// group with at least `min_frames` items becomes one [`FileSequence`],
-    /// with its items sorted by frame number. Dotfiles and names that don't
-    /// parse (no frame number) are skipped. The returned sequences are ordered
-    /// deterministically by their grouping key.
+    /// with its items sorted by frame number. Dotfiles are skipped silently;
+    /// non-dotfiles that contain no frame number are returned in
+    /// [`ParseResult::rogues`]. Sequences are ordered deterministically by
+    /// their grouping key.
     ///
-    /// Items with clashing frame numbers but different padding are *not* split
-    /// into separate sequences yet (pysequitur's anomalous-sequence handling
-    /// is not ported).
-    pub fn from_filenames(
+    /// When a group contains the same frame number at more than one padding, it
+    /// is split into a main sequence (using the most common padding) plus one
+    /// anomalous sequence per off-nominal padding. Only the split fragments
+    /// that still have at least two frames are kept.
+    pub fn parse_filenames(
         filenames: &[impl AsRef<str>],
         min_frames: usize,
         directory: Option<PathBuf>,
-    ) -> Vec<FileSequence> {
+    ) -> ParseResult {
         let mut groups: BTreeMap<(String, String, String, String), Vec<Item>> = BTreeMap::new();
+        let mut rogues: Vec<PathBuf> = Vec::new();
 
         for name in filenames {
             let name = name.as_ref();
@@ -47,6 +63,10 @@ impl FileSequence {
                 continue;
             }
             let Some(item) = Item::from_filename(name, directory.clone()) else {
+                rogues.push(match &directory {
+                    Some(dir) => dir.join(name),
+                    None => PathBuf::from(name),
+                });
                 continue;
             };
             let key = (
@@ -58,24 +78,43 @@ impl FileSequence {
             groups.entry(key).or_default().push(item);
         }
 
-        groups
-            .into_values()
-            .filter(|items| items.len() >= min_frames)
-            .map(|mut items| {
-                items.sort_by_key(|i| i.frame_number());
-                FileSequence { items }
-            })
-            .collect()
+        let mut sequences = Vec::new();
+        for mut items in groups.into_values() {
+            if items.len() < min_frames {
+                continue;
+            }
+            items.sort_by_key(|i| i.frame_number());
+            let seq = FileSequence { items };
+            if seq.find_duplicate_frames().is_empty() {
+                sequences.push(seq);
+            } else {
+                sequences.extend(seq.split_on_duplicates());
+            }
+        }
+
+        ParseResult { sequences, rogues }
     }
 
-    /// Reads a directory and groups its files into sequences.
+    /// Parses a list of bare filenames and returns just the sequences.
     ///
-    /// Only regular files are considered. See [`FileSequence::from_filenames`]
+    /// Convenience wrapper over [`FileSequence::parse_filenames`] that discards
+    /// the rogue list. See it for the grouping and splitting rules.
+    pub fn from_filenames(
+        filenames: &[impl AsRef<str>],
+        min_frames: usize,
+        directory: Option<PathBuf>,
+    ) -> Vec<FileSequence> {
+        FileSequence::parse_filenames(filenames, min_frames, directory).sequences
+    }
+
+    /// Reads a directory and parses its files into sequences, reporting rogues.
+    ///
+    /// Only regular files are considered. See [`FileSequence::parse_filenames`]
     /// for the grouping rules.
-    pub fn from_directory(
+    pub fn parse_directory(
         directory: &Path,
         min_frames: usize,
-    ) -> Result<Vec<FileSequence>, SequenceError> {
+    ) -> Result<ParseResult, SequenceError> {
         let mut filenames: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
@@ -86,11 +125,22 @@ impl FileSequence {
                 filenames.push(name.to_string());
             }
         }
-        Ok(FileSequence::from_filenames(
+        Ok(FileSequence::parse_filenames(
             &filenames,
             min_frames,
             Some(directory.to_path_buf()),
         ))
+    }
+
+    /// Reads a directory and returns just the sequences it contains.
+    ///
+    /// Convenience wrapper over [`FileSequence::parse_directory`] that discards
+    /// the rogue list.
+    pub fn from_directory(
+        directory: &Path,
+        min_frames: usize,
+    ) -> Result<Vec<FileSequence>, SequenceError> {
+        Ok(FileSequence::parse_directory(directory, min_frames)?.sequences)
     }
 
     pub fn len(&self) -> usize {
@@ -155,6 +205,151 @@ impl FileSequence {
             return Err(SequenceError::InconsistentProperty("padding"));
         }
         Ok(first)
+    }
+
+    /// Returns the most common padding among the items.
+    ///
+    /// Unlike [`FileSequence::padding`], this never errors on inconsistent
+    /// padding — it picks the dominant width, breaking ties toward the smaller
+    /// padding. Used internally when reasoning about anomalous frames.
+    pub fn nominal_padding(&self) -> usize {
+        let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+        for item in &self.items {
+            *counts.entry(item.padding()).or_insert(0) += 1;
+        }
+        // BTreeMap iterates by ascending padding, so `max_by_key` on count
+        // keeps the first (smallest padding) seen on ties.
+        counts
+            .into_iter()
+            .max_by_key(|&(_, count)| count)
+            .map(|(padding, _)| padding)
+            .unwrap_or(0)
+    }
+
+    /// Returns the number of items in the sequence (frames actually present).
+    pub fn actual_frame_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Returns the span of the sequence: `last_frame - first_frame + 1`,
+    /// counting missing frames in between.
+    pub fn frame_count(&self) -> i32 {
+        self.last_frame() - self.first_frame() + 1
+    }
+
+    /// Iterates over the items in frame order.
+    pub fn iter(&self) -> std::slice::Iter<'_, Item> {
+        self.items.iter()
+    }
+
+    /// Returns `true` if the given frame number is present in the sequence.
+    pub fn contains(&self, frame: i32) -> bool {
+        self.items.iter().any(|i| i.frame_number() == frame)
+    }
+
+    /// Returns the item with the given frame number, if present.
+    pub fn get_frame(&self, frame: i32) -> Option<&Item> {
+        self.items.iter().find(|i| i.frame_number() == frame)
+    }
+
+    /// Returns a new sequence containing only the frames in the inclusive
+    /// range `start..=end`. The result may be empty.
+    pub fn frames(&self, start: i32, end: i32) -> FileSequence {
+        let mut items: Vec<Item> = self
+            .items
+            .iter()
+            .filter(|i| (start..=end).contains(&i.frame_number()))
+            .cloned()
+            .collect();
+        items.sort_by_key(|i| i.frame_number());
+        FileSequence { items }
+    }
+
+    /// Identifies frames that appear more than once (typically at differing
+    /// padding). Each entry maps a frame number to all items at that frame,
+    /// ordered so the item matching the sequence's [`nominal_padding`] comes
+    /// first.
+    ///
+    /// [`nominal_padding`]: FileSequence::nominal_padding
+    pub fn find_duplicate_frames(&self) -> BTreeMap<i32, Vec<Item>> {
+        let mut groups: BTreeMap<i32, Vec<Item>> = BTreeMap::new();
+        for item in &self.items {
+            groups.entry(item.frame_number()).or_default().push(item.clone());
+        }
+
+        let nominal = self.nominal_padding();
+        groups
+            .into_iter()
+            .filter(|(_, items)| items.len() > 1)
+            .map(|(frame, mut items)| {
+                items.sort_by_key(|i| (i.padding() != nominal, i.padding(), i.filename()));
+                (frame, items)
+            })
+            .collect()
+    }
+
+    /// Splits a sequence that contains duplicate frame numbers into a main
+    /// sequence (items at the most common padding) plus one anomalous sequence
+    /// per off-nominal padding. Only fragments with at least two frames are
+    /// returned.
+    fn split_on_duplicates(&self) -> Vec<FileSequence> {
+        let duplicates = self.find_duplicate_frames();
+        let nominal = self.nominal_padding();
+
+        let mut main_items: Vec<Item> = Vec::new();
+        let mut anomalous: BTreeMap<usize, Vec<Item>> = BTreeMap::new();
+        let mut processed: HashSet<i32> = HashSet::new();
+
+        for item in &self.items {
+            let frame = item.frame_number();
+            if !processed.insert(frame) {
+                continue;
+            }
+            match duplicates.get(&frame) {
+                Some(dups) => {
+                    for dup in dups {
+                        if dup.padding() == nominal {
+                            main_items.push(dup.clone());
+                        } else {
+                            anomalous.entry(dup.padding()).or_default().push(dup.clone());
+                        }
+                    }
+                }
+                None => main_items.push(item.clone()),
+            }
+        }
+
+        let mut result = Vec::new();
+        if main_items.len() >= 2 {
+            main_items.sort_by_key(|i| i.frame_number());
+            result.push(FileSequence { items: main_items });
+        }
+        for (_, mut items) in anomalous {
+            if items.len() >= 2 {
+                items.sort_by_key(|i| i.frame_number());
+                result.push(FileSequence { items });
+            }
+        }
+        result
+    }
+}
+
+impl Index<usize> for FileSequence {
+    type Output = Item;
+
+    /// Positional access into the frame-ordered items (0-based), like a slice.
+    /// For lookup by frame number, use [`FileSequence::get_frame`].
+    fn index(&self, index: usize) -> &Item {
+        &self.items[index]
+    }
+}
+
+impl<'a> IntoIterator for &'a FileSequence {
+    type Item = &'a Item;
+    type IntoIter = std::slice::Iter<'a, Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter()
     }
 }
 
