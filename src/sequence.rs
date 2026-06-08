@@ -11,6 +11,7 @@ use std::{
 };
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct FileSequence {
     items: Vec<Item>,
 }
@@ -18,6 +19,7 @@ pub struct FileSequence {
 /// The outcome of parsing a set of filenames: the sequences that were found,
 /// plus any filenames that could not be parsed as sequence items ("rogues").
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ParseResult {
     /// Sequences discovered, ordered deterministically by grouping key.
     pub sequences: Vec<FileSequence>,
@@ -105,6 +107,43 @@ impl FileSequence {
         directory: Option<PathBuf>,
     ) -> Vec<FileSequence> {
         FileSequence::parse_filenames(filenames, min_frames, directory).sequences
+    }
+
+    /// Parses a heterogeneous list of full paths into sequences, bucketing by
+    /// parent directory.
+    ///
+    /// This is the entry point for ingesting files dropped from several folders
+    /// at once (e.g. a drag-and-drop GUI): paths are grouped by their parent
+    /// directory, each bucket is parsed independently via
+    /// [`parse_filenames`], and the results are merged into a single
+    /// [`ParseResult`]. Buckets are processed in directory order so the output
+    /// is deterministic. Paths with no file name are reported as rogues.
+    ///
+    /// [`parse_filenames`]: FileSequence::parse_filenames
+    pub fn from_paths(paths: &[PathBuf], min_frames: usize) -> ParseResult {
+        let mut by_dir: BTreeMap<Option<PathBuf>, Vec<String>> = BTreeMap::new();
+        let mut rogues: Vec<PathBuf> = Vec::new();
+
+        for path in paths {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                rogues.push(path.clone());
+                continue;
+            };
+            let dir = match path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => Some(p.to_path_buf()),
+                _ => None,
+            };
+            by_dir.entry(dir).or_default().push(name.to_string());
+        }
+
+        let mut sequences = Vec::new();
+        for (dir, names) in by_dir {
+            let result = FileSequence::parse_filenames(&names, min_frames, dir);
+            sequences.extend(result.sequences);
+            rogues.extend(result.rogues);
+        }
+
+        ParseResult { sequences, rogues }
     }
 
     /// Reads a directory and parses its files into sequences, reporting rogues.

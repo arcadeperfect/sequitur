@@ -1,4 +1,5 @@
 #[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Components {
     pub prefix: Option<String>,
     pub delimiter: Option<String>,

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum FileOperation {
     Rename {
         source: PathBuf,
@@ -62,11 +63,45 @@ impl FileOperation {
 
 /// The outcome of executing an [`OperationPlan`].
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ExecutionResult {
     /// Operations that completed successfully, in execution order.
     pub executed: Vec<FileOperation>,
     /// Operations that failed, paired with the error that stopped them.
+    ///
+    /// When serialized, each pair becomes `{ "operation": ..., "error": "..." }`;
+    /// the [`std::io::Error`] is rendered to its message string since it is not
+    /// itself serializable.
+    #[cfg_attr(feature = "serde", serde(serialize_with = "serialize_failed"))]
     pub failed: Vec<(FileOperation, std::io::Error)>,
+}
+
+/// Serializes the `failed` operations, flattening each [`std::io::Error`] to its
+/// message string (the error type is not serde-serializable on its own).
+#[cfg(feature = "serde")]
+fn serialize_failed<S>(
+    failed: &[(FileOperation, std::io::Error)],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+
+    #[derive(serde::Serialize)]
+    struct FailedOp<'a> {
+        operation: &'a FileOperation,
+        error: String,
+    }
+
+    let mut seq = serializer.serialize_seq(Some(failed.len()))?;
+    for (operation, error) in failed {
+        seq.serialize_element(&FailedOp {
+            operation,
+            error: error.to_string(),
+        })?;
+    }
+    seq.end()
 }
 
 impl ExecutionResult {
@@ -82,6 +117,7 @@ impl ExecutionResult {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct OperationPlan {
     operations: Vec<FileOperation>,
 }
@@ -164,6 +200,7 @@ impl Default for OperationPlan {
 /// A proposed new state (`proposed`) paired with the [`OperationPlan`] that
 /// would bring it about. The plan can be inspected before being run.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Planned<T> {
     pub proposed: T,
     pub plan: OperationPlan,

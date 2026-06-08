@@ -123,6 +123,26 @@ fn missing_frames_detected() {
     assert_eq!(seqs[0].missing_frames(), vec![3]);
 }
 
+#[test]
+fn from_paths_buckets_by_parent_directory() {
+    // Same prefix/extension in two different folders must stay distinct, and
+    // each item should carry its own directory.
+    let paths = [
+        PathBuf::from("/a/render_001.exr"),
+        PathBuf::from("/a/render_002.exr"),
+        PathBuf::from("/b/render_001.exr"),
+        PathBuf::from("/b/render_002.exr"),
+        PathBuf::from("/b/notes.txt"), // no frame -> rogue
+    ];
+    let result = FileSequence::from_paths(&paths, 2);
+
+    assert_eq!(result.sequences.len(), 2);
+    // Buckets are processed in directory order, so /a precedes /b.
+    assert_eq!(result.sequences[0].directory().unwrap(), Some(&PathBuf::from("/a")));
+    assert_eq!(result.sequences[1].directory().unwrap(), Some(&PathBuf::from("/b")));
+    assert_eq!(result.rogues, vec![PathBuf::from("/b/notes.txt")]);
+}
+
 // ---------------------------------------------------------------------------
 // Planning (no filesystem)
 // ---------------------------------------------------------------------------

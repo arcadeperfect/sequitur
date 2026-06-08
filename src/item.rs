@@ -22,6 +22,7 @@ const KNOWN_EXTENSIONS: &[&str] = &["tar.gz", "tar.bz2", "log.gz"];
 /// - `shot_010_v2_0042.png` (prefix: "shot_010_v2_", frame: "0042", extension: "png")
 /// - `frame0001_final.jpg` (prefix: "frame", frame: "0001", suffix: "_final", extension: "jpg")
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Item {
     /// The base name before the frame number (e.g., "render" in "render.0001.exr")
     prefix: String,

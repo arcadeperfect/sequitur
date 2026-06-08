@@ -25,3 +25,18 @@ pub enum SequenceError {
     InconsistentProperty(&'static str),
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for SequenceError {
+    /// Serializes the error as its human-readable [`Display`] string. The inner
+    /// [`std::io::Error`] is not itself serializable, so the whole error is
+    /// flattened to a message — enough to surface to a UI over Tauri IPC.
+    ///
+    /// [`Display`]: std::fmt::Display
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
