@@ -163,6 +163,7 @@ impl Default for OperationPlan {
 
 /// A proposed new state (`proposed`) paired with the [`OperationPlan`] that
 /// would bring it about. The plan can be inspected before being run.
+#[derive(Debug)]
 pub struct Planned<T> {
     pub proposed: T,
     pub plan: OperationPlan,

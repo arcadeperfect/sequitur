@@ -192,6 +192,13 @@ impl FileSequence {
         }
         Ok(first)
     }
+    pub fn suffix(&self) -> Result<Option<&str>, SequenceError> {
+        let first = self.items.first().unwrap().suffix();
+        if self.items.iter().any(|i| i.suffix() != first) {
+            return Err(SequenceError::InconsistentProperty("suffix"));
+        }
+        Ok(first)
+    }
     pub fn directory(&self) -> Result<Option<&PathBuf>, SequenceError> {
         let first = self.items.first().unwrap().directory();
         if self.items.iter().any(|i| i.directory() != first) {
@@ -224,6 +231,41 @@ impl FileSequence {
             .max_by_key(|&(_, count)| count)
             .map(|(padding, _)| padding)
             .unwrap_or(0)
+    }
+
+    /// Renders the sequence as a hash-notation pattern, e.g. `render_####.exr`.
+    ///
+    /// The hash count is the [`nominal_padding`]. Errors if the prefix,
+    /// delimiter, suffix, or extension are inconsistent across items.
+    ///
+    /// [`nominal_padding`]: FileSequence::nominal_padding
+    pub fn sequence_string(&self) -> Result<String, SequenceError> {
+        let hashes = "#".repeat(self.nominal_padding());
+        Ok(format!(
+            "{}{}{}{}.{}",
+            self.prefix()?,
+            self.delimiter()?.unwrap_or(""),
+            hashes,
+            self.suffix()?.unwrap_or(""),
+            self.extension()?,
+        ))
+    }
+
+    /// Renders the sequence as a printf-notation pattern, e.g. `render_%04d.exr`.
+    ///
+    /// Like [`sequence_string`] but using `%0Nd` for the frame placeholder.
+    ///
+    /// [`sequence_string`]: FileSequence::sequence_string
+    pub fn sequence_string_printf(&self) -> Result<String, SequenceError> {
+        let token = format!("%0{}d", self.nominal_padding());
+        Ok(format!(
+            "{}{}{}{}.{}",
+            self.prefix()?,
+            self.delimiter()?.unwrap_or(""),
+            token,
+            self.suffix()?.unwrap_or(""),
+            self.extension()?,
+        ))
     }
 
     /// Returns the number of items in the sequence (frames actually present).
@@ -382,6 +424,96 @@ impl FileSequence {
         let mut new_items = Vec::new();
         for item in &self.items {
             let result = item.move_to(None, Some(directory.to_path_buf()));
+            new_items.push(result.proposed);
+            plan.extend(result.plan);
+        }
+        Planned {
+            proposed: FileSequence { items: new_items },
+            plan,
+        }
+    }
+
+    /// Prepares a plan to copy every item in the sequence.
+    ///
+    /// `new_name` optionally rewrites filename components; `new_directory`
+    /// optionally targets a different directory. Both are applied per item.
+    pub fn copy(
+        &self,
+        new_name: Option<Components>,
+        new_directory: Option<PathBuf>,
+    ) -> Planned<FileSequence> {
+        let mut plan = OperationPlan::new();
+        let mut new_items = Vec::new();
+        for item in &self.items {
+            let result = item.copy_to(new_name.clone(), new_directory.clone());
+            new_items.push(result.proposed);
+            plan.extend(result.plan);
+        }
+        Planned {
+            proposed: FileSequence { items: new_items },
+            plan,
+        }
+    }
+
+    /// Prepares a plan to shift every frame number by `offset`.
+    ///
+    /// `padding` optionally sets the new zero-padding width; it is widened if
+    /// necessary so the highest resulting frame still fits. Renames are emitted
+    /// high-frame-first when shifting up (and low-first when shifting down) to
+    /// avoid clobbering not-yet-moved frames. A zero offset is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SequenceError::NegativeFrame`] if the shift would produce a
+    /// negative frame number.
+    pub fn offset_frames(
+        &self,
+        offset: i32,
+        padding: Option<usize>,
+    ) -> Result<Planned<FileSequence>, SequenceError> {
+        if offset == 0 {
+            return Ok(Planned {
+                proposed: self.clone(),
+                plan: OperationPlan::new(),
+            });
+        }
+        if self.first_frame() + offset < 0 {
+            return Err(SequenceError::NegativeFrame(offset as isize));
+        }
+
+        let mut padding = padding.unwrap_or_else(|| self.nominal_padding());
+        padding = padding.max((self.last_frame() + offset).to_string().len());
+
+        let mut ordered: Vec<&Item> = self.items.iter().collect();
+        ordered.sort_by_key(|i| i.frame_number());
+        if offset > 0 {
+            ordered.reverse();
+        }
+
+        let mut plan = OperationPlan::new();
+        let mut new_items = Vec::new();
+        for item in ordered {
+            let result = item.with_frame_number(item.frame_number() + offset, Some(padding));
+            new_items.push(result.proposed);
+            plan.extend(result.plan);
+        }
+        new_items.sort_by_key(|i| i.frame_number());
+
+        Ok(Planned {
+            proposed: FileSequence { items: new_items },
+            plan,
+        })
+    }
+
+    /// Prepares a plan to re-pad every frame to `padding` digits.
+    ///
+    /// The width is widened if needed so the highest frame still fits.
+    pub fn with_padding(&self, padding: usize) -> Planned<FileSequence> {
+        let padding = padding.max(self.last_frame().to_string().len());
+        let mut plan = OperationPlan::new();
+        let mut new_items = Vec::new();
+        for item in &self.items {
+            let result = item.with_padding(padding);
             new_items.push(result.proposed);
             plan.extend(result.plan);
         }

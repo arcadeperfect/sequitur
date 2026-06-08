@@ -74,34 +74,8 @@ impl Item {
         let frame_string = name_part[frame_start..frame_end].to_string();
         let suffix = &name_part[frame_end..];
 
-        // Delimiter = the run of non-alphanumeric chars immediately before the
-        // frame. Only its final char is the delimiter; any earlier chars belong
-        // to the prefix. Walk by chars (not bytes) to stay UTF-8 safe.
-        let before_frame = &name_part[..frame_start];
-        let mut delim_start = frame_start;
-        for (idx, ch) in before_frame.char_indices().rev() {
-            if is_delimiter_char(ch) {
-                delim_start = idx;
-            } else {
-                break;
-            }
-        }
-
-        let (prefix, delimiter) = if delim_start == frame_start {
-            (before_frame.to_string(), None)
-        } else {
-            // The delimiter is the single char immediately before the frame;
-            // earlier delimiter chars fold back into the prefix.
-            let last_char_start = before_frame
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            (
-                name_part[..last_char_start].to_string(),
-                Some(name_part[last_char_start..frame_start].to_string()),
-            )
-        };
+        // Split the text before the frame into prefix + delimiter.
+        let (prefix, delimiter) = split_prefix_delimiter(&name_part[..frame_start]);
 
         Some(Item {
             prefix,
@@ -399,7 +373,7 @@ impl Item {
 /// Splits a filename into its name part and extension, honouring known
 /// compound extensions such as `tar.gz`. Returns `(name_part, extension)` where
 /// `extension` excludes the leading dot and may be empty.
-fn split_extension(filename: &str) -> (&str, &str) {
+pub(crate) fn split_extension(filename: &str) -> (&str, &str) {
     for ext in KNOWN_EXTENSIONS {
         if let Some(stem) = filename
             .strip_suffix(ext)
@@ -411,6 +385,38 @@ fn split_extension(filename: &str) -> (&str, &str) {
     match filename.rfind('.') {
         Some(dot) => (&filename[..dot], &filename[dot + 1..]),
         None => (filename, ""),
+    }
+}
+
+/// Splits the text that precedes a frame number (or `####` placeholder) into a
+/// `(prefix, delimiter)` pair.
+///
+/// The delimiter is the run of non-alphanumeric chars immediately before the
+/// frame; only its final char is kept as the delimiter, and any earlier chars
+/// fold back into the prefix (mirroring pysequitur's `len(delimiter) > 1`
+/// rule). Walks by chars, not bytes, to stay UTF-8 safe.
+pub(crate) fn split_prefix_delimiter(before_frame: &str) -> (String, Option<String>) {
+    let mut delim_start = before_frame.len();
+    for (idx, ch) in before_frame.char_indices().rev() {
+        if is_delimiter_char(ch) {
+            delim_start = idx;
+        } else {
+            break;
+        }
+    }
+
+    if delim_start == before_frame.len() {
+        (before_frame.to_string(), None)
+    } else {
+        let last_char_start = before_frame
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        (
+            before_frame[..last_char_start].to_string(),
+            Some(before_frame[last_char_start..].to_string()),
+        )
     }
 }
 

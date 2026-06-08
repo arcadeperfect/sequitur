@@ -1,6 +1,6 @@
 //! End-to-end tests for the core round-trip: parse -> group -> plan -> execute.
 
-use sequitur::{Components, FileSequence, Item, ParseResult};
+use sequitur::{convert_padding_to_hashes, Components, FileOperation, FileSequence, Item, ParseResult};
 use std::fs;
 use std::path::PathBuf;
 
@@ -325,4 +325,136 @@ fn frames_returns_inclusive_subrange() {
     // Out-of-range request yields an empty (but valid) sequence.
     let empty = seq.frames(100, 200);
     assert!(empty.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Sequence-string notation (render + parse)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn renders_sequence_string() {
+    let seq = &FileSequence::from_filenames(&["render_001.exr", "render_002.exr"], 2, None)[0];
+    assert_eq!(seq.sequence_string().unwrap(), "render_###.exr");
+    assert_eq!(seq.sequence_string_printf().unwrap(), "render_%03d.exr");
+}
+
+#[test]
+fn parses_hash_and_printf_patterns() {
+    let hash = Components::from_sequence_string("render_####.exr").unwrap();
+    assert_eq!(hash.prefix.as_deref(), Some("render"));
+    assert_eq!(hash.delimiter.as_deref(), Some("_"));
+    assert_eq!(hash.padding, Some(4));
+    assert_eq!(hash.suffix, None);
+    assert_eq!(hash.extension.as_deref(), Some("exr"));
+    assert_eq!(hash.frame_number, None);
+
+    // printf form parses identically.
+    let printf = Components::from_sequence_string("render_%04d.exr").unwrap();
+    assert_eq!(printf, hash);
+}
+
+#[test]
+fn parses_pattern_with_suffix() {
+    let c = Components::from_sequence_string("frame####_final.jpg").unwrap();
+    assert_eq!(c.prefix.as_deref(), Some("frame"));
+    assert_eq!(c.delimiter, None);
+    assert_eq!(c.padding, Some(4));
+    assert_eq!(c.suffix.as_deref(), Some("_final"));
+    assert_eq!(c.extension.as_deref(), Some("jpg"));
+}
+
+#[test]
+fn pattern_without_placeholder_is_none() {
+    assert!(Components::from_sequence_string("render.exr").is_none());
+}
+
+#[test]
+fn sequence_string_round_trips_through_parse() {
+    let seq = &FileSequence::from_filenames(&["shot_0001.exr", "shot_0002.exr"], 2, None)[0];
+    let s = seq.sequence_string().unwrap();
+    let c = Components::from_sequence_string(&s).unwrap();
+    assert_eq!(c.prefix.as_deref(), Some("shot"));
+    assert_eq!(c.delimiter.as_deref(), Some("_"));
+    assert_eq!(c.padding, Some(4));
+    assert_eq!(c.extension.as_deref(), Some("exr"));
+}
+
+#[test]
+fn printf_to_hash_conversion() {
+    assert_eq!(convert_padding_to_hashes("render_%04d.exr"), "render_####.exr");
+    assert_eq!(convert_padding_to_hashes("%d"), "#");
+    assert_eq!(convert_padding_to_hashes("a_%4d_b"), "a_####_b");
+    // A bare percent that isn't a printf token is left alone.
+    assert_eq!(convert_padding_to_hashes("50% done"), "50% done");
+}
+
+// ---------------------------------------------------------------------------
+// FileSequence verbs: copy / offset_frames / with_padding
+// ---------------------------------------------------------------------------
+
+#[test]
+fn copy_renames_components_per_item() {
+    let seq = &FileSequence::from_filenames(&["render_001.exr", "render_002.exr"], 2, None)[0];
+    let planned = seq.copy(Some(Components::new().prefix("bak")), None);
+
+    let names: Vec<String> = planned.proposed.iter().map(|i| i.filename()).collect();
+    assert_eq!(names, vec!["bak_001.exr", "bak_002.exr"]);
+    assert_eq!(planned.plan.len(), 2);
+    assert!(planned
+        .plan
+        .operations()
+        .iter()
+        .all(|op| matches!(op, FileOperation::Copy { .. })));
+}
+
+#[test]
+fn offset_frames_shifts_and_keeps_padding() {
+    let seq = &FileSequence::from_filenames(
+        &["render_001.exr", "render_002.exr", "render_003.exr"],
+        2,
+        None,
+    )[0];
+    let planned = seq.offset_frames(10, None).unwrap();
+    assert_eq!(planned.proposed.existing_frames(), vec![11, 12, 13]);
+    assert_eq!(planned.plan.len(), 3);
+    let names: Vec<String> = planned.proposed.iter().map(|i| i.filename()).collect();
+    assert_eq!(names, vec!["render_011.exr", "render_012.exr", "render_013.exr"]);
+}
+
+#[test]
+fn offset_frames_widens_padding_when_needed() {
+    let seq = &FileSequence::from_filenames(&["a_8.exr", "a_9.exr"], 2, None)[0];
+    let planned = seq.offset_frames(2, None).unwrap();
+    let names: Vec<String> = planned.proposed.iter().map(|i| i.filename()).collect();
+    assert_eq!(names, vec!["a_10.exr", "a_11.exr"]);
+}
+
+#[test]
+fn offset_frames_zero_is_noop() {
+    let seq = &FileSequence::from_filenames(&["a_001.exr", "a_002.exr"], 2, None)[0];
+    let planned = seq.offset_frames(0, None).unwrap();
+    assert!(planned.plan.is_empty());
+    assert_eq!(planned.proposed.existing_frames(), vec![1, 2]);
+}
+
+#[test]
+fn offset_frames_rejects_negative_result() {
+    let seq = &FileSequence::from_filenames(&["a_001.exr", "a_002.exr"], 2, None)[0];
+    let err = seq.offset_frames(-5, None).unwrap_err();
+    assert!(matches!(err, sequitur::SequenceError::NegativeFrame(_)));
+}
+
+#[test]
+fn with_padding_grows_and_respects_floor() {
+    let seq = &FileSequence::from_filenames(&["render_001.exr", "render_002.exr"], 2, None)[0];
+    let grown = seq.with_padding(5);
+    let names: Vec<String> = grown.proposed.iter().map(|i| i.filename()).collect();
+    assert_eq!(names, vec!["render_00001.exr", "render_00002.exr"]);
+
+    // Requesting fewer digits than the largest frame needs is clamped: frame
+    // 101 needs 3, so padding 1 is a no-op.
+    let wide = &FileSequence::from_filenames(&["x_100.exr", "x_101.exr"], 2, None)[0];
+    let shrunk = wide.with_padding(1);
+    assert!(shrunk.plan.is_empty());
+    assert_eq!(shrunk.proposed.iter().next().unwrap().padding(), 3);
 }
