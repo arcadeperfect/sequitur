@@ -1,6 +1,9 @@
 //! End-to-end tests for the core round-trip: parse -> group -> plan -> execute.
 
-use sequitur::{convert_padding_to_hashes, Components, FileOperation, FileSequence, Item, ParseResult};
+use sequitur::{
+    convert_padding_to_hashes, Components, DirEntry, EntryKind, FileOperation, FileSequence, Item,
+    ParseResult,
+};
 use std::fs;
 use std::path::PathBuf;
 
@@ -214,6 +217,65 @@ fn execute_reports_conflict_without_force() {
     assert!(planned.plan.has_conflicts());
     let err = planned.plan.execute(false).unwrap_err();
     assert!(matches!(err, sequitur::SequenceError::Conflict(_)));
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn directory_listing_classifies_all_entries() {
+    let dir = temp_dir("listing");
+    // A real two-frame sequence.
+    fs::write(dir.join("shot_001.exr"), b"x").unwrap();
+    fs::write(dir.join("shot_002.exr"), b"x").unwrap();
+    // A lone frame below min_frames must still appear (as a loose file).
+    fs::write(dir.join("lone_010.exr"), b"x").unwrap();
+    // An unparseable loose file, a hidden file, and a subdirectory.
+    fs::write(dir.join("notes.txt"), b"x").unwrap();
+    fs::write(dir.join(".hidden"), b"x").unwrap();
+    fs::create_dir(dir.join("subdir")).unwrap();
+
+    let listing = FileSequence::parse_directory(&dir, 2).unwrap();
+
+    // Exactly one sequence: shot_###, holding only its two frames.
+    assert_eq!(listing.sequences.len(), 1);
+    assert_eq!(listing.sequences[0].len(), 2);
+
+    let find = |name: &str| -> &DirEntry {
+        listing
+            .entries
+            .iter()
+            .find(|e| e.path.ends_with(name))
+            .unwrap_or_else(|| panic!("missing entry {name}"))
+    };
+
+    // Sub-threshold frame and unparseable file are surfaced as loose files.
+    assert_eq!(find("lone_010.exr").kind, EntryKind::File);
+    assert_eq!(find("notes.txt").kind, EntryKind::File);
+    // Subdirectory is classified, not dropped.
+    assert_eq!(find("subdir").kind, EntryKind::Directory);
+    // Hidden entry is surfaced and flagged.
+    assert!(find(".hidden").hidden);
+    // None of the sequence's own frames leak into entries.
+    assert!(!listing.entries.iter().any(|e| e.path.ends_with("shot_001.exr")));
+    // Entries are sorted by path.
+    let paths: Vec<_> = listing.entries.iter().map(|e| e.path.clone()).collect();
+    let mut sorted = paths.clone();
+    sorted.sort();
+    assert_eq!(paths, sorted);
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_listing_reports_symlinks() {
+    let dir = temp_dir("symlink");
+    fs::write(dir.join("target.txt"), b"x").unwrap();
+    std::os::unix::fs::symlink(dir.join("target.txt"), dir.join("link.txt")).unwrap();
+
+    let listing = FileSequence::parse_directory(&dir, 2).unwrap();
+    let link = listing.entries.iter().find(|e| e.path.ends_with("link.txt")).unwrap();
+    assert_eq!(link.kind, EntryKind::Symlink);
 
     fs::remove_dir_all(&dir).unwrap();
 }

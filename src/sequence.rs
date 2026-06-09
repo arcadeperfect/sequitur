@@ -28,6 +28,53 @@ pub struct ParseResult {
     pub rogues: Vec<PathBuf>,
 }
 
+/// What a single directory entry is, for entries not absorbed into a sequence.
+///
+/// Determined from [`std::fs::DirEntry::file_type`], which does **not** follow
+/// symlinks — a symlink is reported as [`EntryKind::Symlink`] regardless of its
+/// target, leaving resolution to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+    /// Anything else (FIFO, socket, device, …).
+    Other,
+}
+
+/// A directory entry that is not part of a [`FileSequence`]: a loose file, a
+/// subdirectory, or a symlink. Classification only — no size, mtime, or other
+/// metadata; callers enrich as needed.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct DirEntry {
+    pub path: PathBuf,
+    pub kind: EntryKind,
+    /// `true` if the entry's name begins with `.`. Surfaced rather than dropped
+    /// so a frontend can offer a "show hidden" toggle.
+    pub hidden: bool,
+}
+
+/// A faithful classification of a directory's contents: the sequences found,
+/// plus every other entry as a flat list.
+///
+/// Unlike [`ParseResult`] (which only classifies *filenames* and so cannot know
+/// what is a directory), this is produced by reading the filesystem, so it can
+/// distinguish files, subdirectories, and symlinks, and surfaces hidden entries
+/// instead of silently skipping them. This is the shared "what's in this folder"
+/// contract that any frontend can render.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct DirectoryListing {
+    /// Sequences discovered, ordered deterministically by grouping key.
+    pub sequences: Vec<FileSequence>,
+    /// Everything not absorbed into a sequence, ordered by path. Includes loose
+    /// files (whether unparseable or below `min_frames`), subdirectories,
+    /// symlinks, and hidden entries (flagged via [`DirEntry::hidden`]).
+    pub entries: Vec<DirEntry>,
+}
+
 impl FileSequence {
     pub fn new(items: Vec<Item>) -> Result<Self, SequenceError> {
         if items.is_empty() {
@@ -146,35 +193,71 @@ impl FileSequence {
         ParseResult { sequences, rogues }
     }
 
-    /// Reads a directory and parses its files into sequences, reporting rogues.
+    /// Reads a directory and classifies its contents into a [`DirectoryListing`].
     ///
-    /// Only regular files are considered. See [`FileSequence::parse_filenames`]
-    /// for the grouping rules.
+    /// Non-hidden regular files are grouped into sequences (see
+    /// [`FileSequence::parse_filenames`] for the rules). Everything else — loose
+    /// files (whether they failed to parse or fell below `min_frames`),
+    /// subdirectories, symlinks, and hidden entries — is reported as a
+    /// [`DirEntry`], so the listing faithfully represents the directory. The
+    /// scan is flat (non-recursive) and classification-only (no metadata).
     pub fn parse_directory(
         directory: &Path,
         min_frames: usize,
-    ) -> Result<ParseResult, SequenceError> {
+    ) -> Result<DirectoryListing, SequenceError> {
         let mut filenames: Vec<String> = Vec::new();
+        let mut file_paths: Vec<PathBuf> = Vec::new();
+        let mut entries: Vec<DirEntry> = Vec::new();
+
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            if let Some(name) = entry.file_name().to_str() {
-                filenames.push(name.to_string());
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let hidden = name.starts_with('.');
+            let file_type = entry.file_type()?;
+
+            if file_type.is_symlink() {
+                entries.push(DirEntry { path, kind: EntryKind::Symlink, hidden });
+            } else if file_type.is_dir() {
+                entries.push(DirEntry { path, kind: EntryKind::Directory, hidden });
+            } else if file_type.is_file() {
+                if hidden {
+                    // Surfaced, but never grouped into a sequence.
+                    entries.push(DirEntry { path, kind: EntryKind::File, hidden });
+                } else {
+                    filenames.push(name);
+                    file_paths.push(path);
+                }
+            } else {
+                entries.push(DirEntry { path, kind: EntryKind::Other, hidden });
             }
         }
-        Ok(FileSequence::parse_filenames(
-            &filenames,
-            min_frames,
-            Some(directory.to_path_buf()),
-        ))
+
+        let parsed =
+            FileSequence::parse_filenames(&filenames, min_frames, Some(directory.to_path_buf()));
+
+        // Any non-hidden regular file not absorbed into a sequence — an
+        // unparseable name *or* a frame below `min_frames` — becomes a loose
+        // File entry, so nothing on disk silently disappears from the listing.
+        let in_sequence: HashSet<String> = parsed
+            .sequences
+            .iter()
+            .flat_map(|seq| seq.items().iter().map(|item| item.filename()))
+            .collect();
+        for (name, path) in filenames.iter().zip(file_paths) {
+            if !in_sequence.contains(name) {
+                entries.push(DirEntry { path, kind: EntryKind::File, hidden: false });
+            }
+        }
+
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(DirectoryListing { sequences: parsed.sequences, entries })
     }
 
     /// Reads a directory and returns just the sequences it contains.
     ///
     /// Convenience wrapper over [`FileSequence::parse_directory`] that discards
-    /// the rogue list.
+    /// the non-sequence entries.
     pub fn from_directory(
         directory: &Path,
         min_frames: usize,
