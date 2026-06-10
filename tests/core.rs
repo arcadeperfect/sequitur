@@ -364,6 +364,86 @@ fn commit_rotates_three_files() {
 }
 
 #[test]
+fn commit_observed_reports_every_scheduled_step() {
+    use std::ops::ControlFlow;
+
+    let dir = temp_dir("observe");
+    fs::write(dir.join("a"), b"A").unwrap();
+    fs::write(dir.join("b"), b"B").unwrap();
+
+    // A swap, so the schedule has 3 steps (one synthetic temp hop).
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: dir.join("a"),
+        destination: dir.join("b"),
+    });
+    plan.push(FileOperation::Rename {
+        source: dir.join("b"),
+        destination: dir.join("a"),
+    });
+
+    let mut seen = Vec::new();
+    let result = plan
+        .commit_observed(false, |p| {
+            assert_eq!(p.total, 3);
+            seen.push(p.index);
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+
+    assert!(result.success());
+    assert_eq!(seen, vec![0, 1, 2]);
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn commit_observed_cancellation_unwinds_temp_cycle() {
+    use std::ops::ControlFlow;
+
+    let dir = temp_dir("cancel");
+    fs::write(dir.join("a"), b"A").unwrap();
+    fs::write(dir.join("b"), b"B").unwrap();
+
+    // Cancel mid-swap: stop just before the final step that moves the temp
+    // back into place. The in-flight temp must be unwound, restoring a and b.
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: dir.join("a"),
+        destination: dir.join("b"),
+    });
+    plan.push(FileOperation::Rename {
+        source: dir.join("b"),
+        destination: dir.join("a"),
+    });
+
+    let result = plan
+        .commit_observed(false, |p| {
+            if p.index == 2 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .unwrap();
+
+    // Cancellation is not a failure.
+    assert!(result.success());
+
+    // Original files restored, nothing applied, no temp left behind.
+    assert_eq!(fs::read(dir.join("a")).unwrap(), b"A");
+    assert_eq!(fs::read(dir.join("b")).unwrap(), b"B");
+    let leftovers = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("sequitur-tmp"))
+        .count();
+    assert_eq!(leftovers, 0);
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn directory_listing_classifies_all_entries() {
     let dir = temp_dir("listing");
     // A real two-frame sequence.

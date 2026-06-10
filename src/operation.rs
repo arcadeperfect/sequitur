@@ -1,6 +1,7 @@
 use crate::error::SequenceError;
 use std::collections::HashSet;
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +126,24 @@ impl ExecutionResult {
     pub fn count(&self) -> usize {
         self.executed.len()
     }
+}
+
+/// A single step's worth of progress, handed to the observer of
+/// [`OperationPlan::commit_observed`] just before that step runs.
+///
+/// `index`/`total` count *scheduled* steps, which include the synthetic temp
+/// renames inserted to break cycles, so they can exceed the number of authored
+/// operations. The `operation` borrow lets an observer inspect (or display) the
+/// step about to execute; a temp hop is recognisable by its `sequitur-tmp`
+/// destination.
+#[derive(Debug, Clone, Copy)]
+pub struct Progress<'a> {
+    /// Zero-based index of the step about to run.
+    pub index: usize,
+    /// Total number of scheduled steps.
+    pub total: usize,
+    /// The operation about to be executed.
+    pub operation: &'a FileOperation,
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +345,27 @@ impl OperationPlan {
     /// filesystem is left without stray `sequitur-tmp` files, and the partial
     /// outcome is returned with the offending operation in `failed`.
     pub fn commit(&self, force: bool) -> Result<ExecutionResult, SequenceError> {
+        self.commit_observed(force, |_| ControlFlow::Continue(()))
+    }
+
+    /// Like [`OperationPlan::commit`], but reports [`Progress`] to `observe`
+    /// before each scheduled step and lets it cancel the run.
+    ///
+    /// `observe` is called with the step about to execute; returning
+    /// [`ControlFlow::Break`] stops the transaction *before* that step runs.
+    /// Cancellation is not a failure: already-completed independent operations
+    /// stay applied, any in-flight temp cycle is unwound (so no stray
+    /// `sequitur-tmp` files remain), and the partial [`ExecutionResult`] is
+    /// returned with an empty `failed` list. A genuine I/O error still lands in
+    /// `failed` exactly as for [`commit`](OperationPlan::commit).
+    pub fn commit_observed<F>(
+        &self,
+        force: bool,
+        mut observe: F,
+    ) -> Result<ExecutionResult, SequenceError>
+    where
+        F: FnMut(Progress) -> ControlFlow<()>,
+    {
         if !force {
             let freed: HashSet<&Path> = self
                 .operations
@@ -346,10 +386,24 @@ impl OperationPlan {
         }
 
         let (schedule, temps) = self.build_schedule()?;
+        let total = schedule.len();
 
         let mut executed: Vec<FileOperation> = Vec::new();
         let mut live_temps: Vec<PathBuf> = Vec::new();
-        for op in schedule {
+        for (index, op) in schedule.into_iter().enumerate() {
+            let progress = Progress {
+                index,
+                total,
+                operation: &op,
+            };
+            if observe(progress).is_break() {
+                drain_temps(&mut executed, &mut live_temps);
+                return Ok(ExecutionResult {
+                    executed,
+                    failed: Vec::new(),
+                });
+            }
+
             match op.execute() {
                 Ok(()) => {
                     if let Some(d) = op.destination() {
