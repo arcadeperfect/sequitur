@@ -2,7 +2,7 @@
 
 use sequitur::{
     convert_padding_to_hashes, Components, DirEntry, EntryKind, FileOperation, FileSequence, Item,
-    ParseResult,
+    OperationPlan, ParseResult,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -217,6 +217,148 @@ fn execute_reports_conflict_without_force() {
     assert!(planned.plan.has_conflicts());
     let err = planned.plan.execute(false).unwrap_err();
     assert!(matches!(err, sequitur::SequenceError::Conflict(_)));
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn schedule_orders_dependent_renames() {
+    // b -> c must run before a -> b, otherwise a -> b clobbers the source of
+    // b -> c. The plan is authored in the unsafe order on purpose.
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: PathBuf::from("/x/a"),
+        destination: PathBuf::from("/x/b"),
+    });
+    plan.push(FileOperation::Rename {
+        source: PathBuf::from("/x/b"),
+        destination: PathBuf::from("/x/c"),
+    });
+
+    let schedule = plan.schedule().unwrap();
+    assert_eq!(schedule.len(), 2);
+    // No temp hop needed; just a reordering.
+    assert_eq!(schedule[0].source(), PathBuf::from("/x/b"));
+    assert_eq!(schedule[1].source(), PathBuf::from("/x/a"));
+}
+
+#[test]
+fn schedule_breaks_a_swap_with_a_temp_hop() {
+    // a <-> b is a 2-cycle; it cannot be ordered without a temporary.
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: PathBuf::from("/x/a"),
+        destination: PathBuf::from("/x/b"),
+    });
+    plan.push(FileOperation::Rename {
+        source: PathBuf::from("/x/b"),
+        destination: PathBuf::from("/x/a"),
+    });
+
+    let schedule = plan.schedule().unwrap();
+    // Three steps: hop one out to a temp, move the other, move the temp in.
+    assert_eq!(schedule.len(), 3);
+    // First step renames a live source into a temp path.
+    let first_dest = schedule[0].destination().unwrap().to_path_buf();
+    assert!(first_dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap()
+        .contains("sequitur-tmp"));
+    // Last step moves that temp back into place.
+    assert_eq!(schedule[2].source(), first_dest);
+}
+
+#[test]
+fn commit_swaps_two_files_without_data_loss() {
+    let dir = temp_dir("swap");
+    fs::write(dir.join("a.txt"), b"A").unwrap();
+    fs::write(dir.join("b.txt"), b"B").unwrap();
+
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: dir.join("a.txt"),
+        destination: dir.join("b.txt"),
+    });
+    plan.push(FileOperation::Rename {
+        source: dir.join("b.txt"),
+        destination: dir.join("a.txt"),
+    });
+
+    // Both destinations exist up front, but each is freed by the other op,
+    // so the swap is allowed without force.
+    let result = plan.commit(false).unwrap();
+    assert!(result.success());
+
+    assert_eq!(fs::read(dir.join("a.txt")).unwrap(), b"B");
+    assert_eq!(fs::read(dir.join("b.txt")).unwrap(), b"A");
+
+    // No stray temp files left behind.
+    let leftovers: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("sequitur-tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn commit_reports_conflict_against_unfreed_destination() {
+    let dir = temp_dir("commit_conflict");
+    fs::write(dir.join("x.txt"), b"x").unwrap();
+    fs::write(dir.join("y.txt"), b"y").unwrap();
+
+    // x -> y where y exists and nothing frees it: a real conflict.
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: dir.join("x.txt"),
+        destination: dir.join("y.txt"),
+    });
+
+    let err = plan.commit(false).unwrap_err();
+    assert!(matches!(err, sequitur::SequenceError::Conflict(_)));
+    // force overrides it.
+    assert!(plan.commit(true).unwrap().success());
+    assert_eq!(fs::read(dir.join("y.txt")).unwrap(), b"x");
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn commit_rotates_three_files() {
+    let dir = temp_dir("rotate");
+    fs::write(dir.join("a"), b"A").unwrap();
+    fs::write(dir.join("b"), b"B").unwrap();
+    fs::write(dir.join("c"), b"C").unwrap();
+
+    // a -> b -> c -> a (3-cycle).
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: dir.join("a"),
+        destination: dir.join("b"),
+    });
+    plan.push(FileOperation::Rename {
+        source: dir.join("b"),
+        destination: dir.join("c"),
+    });
+    plan.push(FileOperation::Rename {
+        source: dir.join("c"),
+        destination: dir.join("a"),
+    });
+
+    assert!(plan.commit(false).unwrap().success());
+    assert_eq!(fs::read(dir.join("b")).unwrap(), b"A");
+    assert_eq!(fs::read(dir.join("c")).unwrap(), b"B");
+    assert_eq!(fs::read(dir.join("a")).unwrap(), b"C");
+
+    let leftovers = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("sequitur-tmp"))
+        .count();
+    assert_eq!(leftovers, 0);
 
     fs::remove_dir_all(&dir).unwrap();
 }

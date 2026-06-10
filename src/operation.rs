@@ -1,4 +1,5 @@
 use crate::error::SequenceError;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -58,6 +59,16 @@ impl FileOperation {
             Self::Copy { source, destination } => fs::copy(source, destination).map(|_| ()),
             Self::Delete { source } => fs::remove_file(source),
         }
+    }
+
+    /// Whether performing this operation vacates its source path, so a later
+    /// operation may safely write there. `Rename`, `Move` and `Delete` free
+    /// their source; `Copy` leaves it in place.
+    fn frees_source(&self) -> bool {
+        matches!(
+            self,
+            Self::Rename { .. } | Self::Move { .. } | Self::Delete { .. }
+        )
     }
 }
 
@@ -188,6 +199,217 @@ impl OperationPlan {
         }
 
         Ok(ExecutionResult { executed, failed })
+    }
+
+    /// Orders the operations so every source still exists when its operation
+    /// runs, inserting temporary renames to break dependency cycles (e.g. a
+    /// two-file swap or an N-way rotation).
+    ///
+    /// The returned operations are the *concrete* steps to perform, in order;
+    /// they may include synthetic `Rename`s into hidden temp paths and out of
+    /// them again. Unlike [`OperationPlan::execute`], which runs the plan in
+    /// authored order, this never clobbers a path that another operation still
+    /// needs as its source.
+    ///
+    /// Returns [`SequenceError::Conflict`] only if the operations are
+    /// genuinely unsatisfiable (a destination that no operation will ever
+    /// free and which cannot be hopped through a temp).
+    pub fn schedule(&self) -> Result<Vec<FileOperation>, SequenceError> {
+        Ok(self.build_schedule()?.0)
+    }
+
+    /// Builds the concrete schedule alongside the set of synthetic temp paths
+    /// it introduces (needed by [`OperationPlan::commit`] to unwind a partial
+    /// cycle on failure).
+    fn build_schedule(&self) -> Result<(Vec<FileOperation>, HashSet<PathBuf>), SequenceError> {
+        let mut remaining: Vec<FileOperation> = self.operations.clone();
+
+        // Paths that currently exist in the simulated filesystem.
+        let mut live: HashSet<PathBuf> =
+            remaining.iter().map(|op| op.source().to_path_buf()).collect();
+        // Every path the plan mentions, so temp names can avoid all of them.
+        let mut known: HashSet<PathBuf> = HashSet::new();
+        for op in &remaining {
+            known.insert(op.source().to_path_buf());
+            if let Some(d) = op.destination() {
+                known.insert(d.to_path_buf());
+            }
+        }
+
+        let mut scheduled: Vec<FileOperation> = Vec::new();
+        let mut temps: HashSet<PathBuf> = HashSet::new();
+        let mut counter = 0usize;
+
+        while !remaining.is_empty() {
+            // An op is runnable when its source exists and its destination is
+            // not still occupied by some other op's live source.
+            let runnable = remaining.iter().position(|op| {
+                live.contains(op.source())
+                    && op.destination().is_none_or(|d| !live.contains(d))
+            });
+
+            if let Some(idx) = runnable {
+                let op = remaining.remove(idx);
+                match &op {
+                    FileOperation::Copy { destination, .. } => {
+                        live.insert(destination.clone());
+                    }
+                    FileOperation::Rename { source, destination }
+                    | FileOperation::Move { source, destination } => {
+                        live.remove(source);
+                        live.insert(destination.clone());
+                    }
+                    FileOperation::Delete { source } => {
+                        live.remove(source);
+                    }
+                }
+                scheduled.push(op);
+                continue;
+            }
+
+            // Deadlock: every remaining op is blocked by another's source.
+            // Break the cycle by hopping one blocking source through a temp.
+            let blockers: HashSet<PathBuf> = remaining
+                .iter()
+                .filter_map(|op| op.destination().map(Path::to_path_buf))
+                .collect();
+            let hop = remaining.iter().position(|op| {
+                matches!(
+                    op,
+                    FileOperation::Rename { .. } | FileOperation::Move { .. }
+                ) && blockers.contains(op.source())
+            });
+
+            match hop {
+                Some(idx) => {
+                    let source = remaining[idx].source().to_path_buf();
+                    let temp = temp_path(&source, &known, &mut counter);
+                    known.insert(temp.clone());
+                    temps.insert(temp.clone());
+
+                    scheduled.push(FileOperation::Rename {
+                        source: source.clone(),
+                        destination: temp.clone(),
+                    });
+                    live.remove(&source);
+                    live.insert(temp.clone());
+
+                    match &mut remaining[idx] {
+                        FileOperation::Rename { source: s, .. }
+                        | FileOperation::Move { source: s, .. } => *s = temp,
+                        _ => unreachable!("hop index only selects Rename/Move"),
+                    }
+                }
+                None => {
+                    let stuck: Vec<PathBuf> = remaining
+                        .iter()
+                        .filter_map(|op| op.destination().map(Path::to_path_buf))
+                        .collect();
+                    return Err(SequenceError::Conflict(stuck));
+                }
+            }
+        }
+
+        Ok((scheduled, temps))
+    }
+
+    /// Executes the plan as a cycle-safe transaction.
+    ///
+    /// Unlike [`OperationPlan::execute`], conflicts are judged against the
+    /// *post-plan* filesystem: a destination that already exists is only a
+    /// conflict if no operation in the plan frees that path (so a two-file
+    /// swap is allowed even though both destinations exist up front). With
+    /// `force`, the pre-flight conflict check is skipped entirely.
+    ///
+    /// Operations are then run in [`schedule`](OperationPlan::schedule) order.
+    /// On the first failure, any in-flight temp rename is rolled back so the
+    /// filesystem is left without stray `sequitur-tmp` files, and the partial
+    /// outcome is returned with the offending operation in `failed`.
+    pub fn commit(&self, force: bool) -> Result<ExecutionResult, SequenceError> {
+        if !force {
+            let freed: HashSet<&Path> = self
+                .operations
+                .iter()
+                .filter(|op| op.frees_source())
+                .map(|op| op.source())
+                .collect();
+            let conflicts: Vec<PathBuf> = self
+                .operations
+                .iter()
+                .filter_map(|op| op.destination())
+                .filter(|d| d.exists() && !freed.contains(d))
+                .map(Path::to_path_buf)
+                .collect();
+            if !conflicts.is_empty() {
+                return Err(SequenceError::Conflict(conflicts));
+            }
+        }
+
+        let (schedule, temps) = self.build_schedule()?;
+
+        let mut executed: Vec<FileOperation> = Vec::new();
+        let mut live_temps: Vec<PathBuf> = Vec::new();
+        for op in schedule {
+            match op.execute() {
+                Ok(()) => {
+                    if let Some(d) = op.destination() {
+                        if temps.contains(d) {
+                            live_temps.push(d.to_path_buf());
+                        }
+                    }
+                    if temps.contains(op.source()) {
+                        live_temps.retain(|t| t != op.source());
+                    }
+                    executed.push(op);
+                }
+                Err(e) => {
+                    drain_temps(&mut executed, &mut live_temps);
+                    return Ok(ExecutionResult {
+                        executed,
+                        failed: vec![(op, e)],
+                    });
+                }
+            }
+        }
+
+        Ok(ExecutionResult {
+            executed,
+            failed: Vec::new(),
+        })
+    }
+}
+
+/// Picks a hidden temp path next to `source` that collides with neither the
+/// plan's known paths nor anything already on disk.
+fn temp_path(source: &Path, known: &HashSet<PathBuf>, counter: &mut usize) -> PathBuf {
+    let parent = source.parent().unwrap_or_else(|| Path::new("."));
+    let name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("seq");
+    loop {
+        let candidate = parent.join(format!(".{name}.sequitur-tmp-{counter}"));
+        *counter += 1;
+        if !known.contains(&candidate) && !candidate.exists() {
+            return candidate;
+        }
+    }
+}
+
+/// Unwinds an interrupted temp cycle: reverses already-executed renames (in
+/// LIFO order) until every live temp path has been moved back, popping the
+/// undone operations out of `executed`.
+fn drain_temps(executed: &mut Vec<FileOperation>, live_temps: &mut Vec<PathBuf>) {
+    while !live_temps.is_empty() {
+        let Some(op) = executed.pop() else { break };
+        match &op {
+            FileOperation::Rename { source, destination }
+            | FileOperation::Move { source, destination } => {
+                let _ = fs::rename(destination, source);
+                live_temps.retain(|t| t != destination);
+            }
+            _ => {}
+        }
     }
 }
 
