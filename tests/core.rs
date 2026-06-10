@@ -364,6 +364,65 @@ fn commit_rotates_three_files() {
 }
 
 #[test]
+fn validate_is_pure_and_honest_about_dependent_ops() {
+    use std::collections::HashSet;
+
+    // The projected world contains a, b and c. None of these paths are touched
+    // on disk — validate must not consult the filesystem.
+    let projected: HashSet<PathBuf> =
+        ["/v/a", "/v/b", "/v/c"].iter().map(PathBuf::from).collect();
+
+    // A clean swap: each destination exists in the projected set but is freed
+    // by the partner op, so there is no conflict.
+    let mut swap = OperationPlan::new();
+    swap.push(FileOperation::Rename {
+        source: PathBuf::from("/v/a"),
+        destination: PathBuf::from("/v/b"),
+    });
+    swap.push(FileOperation::Rename {
+        source: PathBuf::from("/v/b"),
+        destination: PathBuf::from("/v/a"),
+    });
+    assert!(swap.validate(&projected).is_ok());
+
+    // Renaming onto c, which exists in the projected set and is freed by no
+    // one, is a genuine conflict.
+    let mut clobber = OperationPlan::new();
+    clobber.push(FileOperation::Rename {
+        source: PathBuf::from("/v/a"),
+        destination: PathBuf::from("/v/c"),
+    });
+    let err = clobber.validate(&projected).unwrap_err();
+    match err {
+        sequitur::SequenceError::Conflict(paths) => {
+            assert_eq!(paths, vec![PathBuf::from("/v/c")]);
+        }
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_flags_two_ops_targeting_one_destination() {
+    use std::collections::HashSet;
+
+    // Empty projected world: the only conflict is internal to the plan.
+    let projected: HashSet<PathBuf> = HashSet::new();
+
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: PathBuf::from("/v/a"),
+        destination: PathBuf::from("/v/x"),
+    });
+    plan.push(FileOperation::Rename {
+        source: PathBuf::from("/v/b"),
+        destination: PathBuf::from("/v/x"),
+    });
+
+    let err = plan.validate(&projected).unwrap_err();
+    assert!(matches!(err, sequitur::SequenceError::Conflict(_)));
+}
+
+#[test]
 fn commit_observed_reports_every_scheduled_step() {
     use std::ops::ControlFlow;
 

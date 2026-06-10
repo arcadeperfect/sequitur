@@ -167,6 +167,58 @@ impl OperationPlan {
     pub fn has_conflicts(&self) -> bool {
         self.operations.iter().any(|op| op.would_overwrite())
     }
+
+    /// Checks the plan against a *projected* path-set — the set of paths that
+    /// exist in the world this plan will run against — without touching disk.
+    ///
+    /// This is the honest, stage-time conflict gate for virtual/staged edits,
+    /// where the live filesystem is the wrong reference (a half-built swap like
+    /// `A→tmp, B→A` would false-positive on disk, and `A→B, C→A` would
+    /// false-negative). A destination conflicts when it is present in `against`
+    /// and **no** operation in the plan vacates that path, or when two
+    /// operations target the same destination. Returns
+    /// [`SequenceError::Conflict`] listing every offending destination.
+    ///
+    /// Unlike [`conflicts`](OperationPlan::conflicts) /
+    /// [`has_conflicts`](OperationPlan::has_conflicts), which test the live
+    /// disk per-operation, this reasons about the plan as a whole.
+    pub fn validate(&self, against: &HashSet<PathBuf>) -> Result<(), SequenceError> {
+        let conflicts = self.collect_conflicts(|d| against.contains(d));
+        if conflicts.is_empty() {
+            Ok(())
+        } else {
+            Err(SequenceError::Conflict(conflicts))
+        }
+    }
+
+    /// Collects every destination that would clobber a path which `exists`
+    /// reports as already present and which no operation in the plan frees,
+    /// plus any destination targeted by more than one operation. Pure: the
+    /// only filesystem knowledge comes from the supplied `exists` predicate.
+    fn collect_conflicts(&self, exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+        let freed: HashSet<&Path> = self
+            .operations
+            .iter()
+            .filter(|op| op.frees_source())
+            .map(|op| op.source())
+            .collect();
+
+        let mut seen: HashSet<&Path> = HashSet::new();
+        let mut conflicts = Vec::new();
+        for op in &self.operations {
+            let Some(dest) = op.destination() else {
+                continue;
+            };
+            if !seen.insert(dest) {
+                // Two operations cannot both produce the same path.
+                conflicts.push(dest.to_path_buf());
+            } else if exists(dest) && !freed.contains(dest) {
+                conflicts.push(dest.to_path_buf());
+            }
+        }
+        conflicts
+    }
+
     pub fn push(&mut self, op: FileOperation) {
         self.operations.push(op);
     }
@@ -367,19 +419,7 @@ impl OperationPlan {
         F: FnMut(Progress) -> ControlFlow<()>,
     {
         if !force {
-            let freed: HashSet<&Path> = self
-                .operations
-                .iter()
-                .filter(|op| op.frees_source())
-                .map(|op| op.source())
-                .collect();
-            let conflicts: Vec<PathBuf> = self
-                .operations
-                .iter()
-                .filter_map(|op| op.destination())
-                .filter(|d| d.exists() && !freed.contains(d))
-                .map(Path::to_path_buf)
-                .collect();
+            let conflicts = self.collect_conflicts(|d| d.exists());
             if !conflicts.is_empty() {
                 return Err(SequenceError::Conflict(conflicts));
             }
