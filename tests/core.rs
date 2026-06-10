@@ -327,6 +327,36 @@ fn commit_reports_conflict_against_unfreed_destination() {
 }
 
 #[test]
+fn commit_allows_case_only_rename_on_case_insensitive_fs() {
+    // On a case-insensitive volume (macOS default) `RENDER.txt` "exists" the
+    // moment `render.txt` does — but renaming one to the other clobbers
+    // nothing. The pre-flight must not flag it as a conflict.
+    let dir = temp_dir("caserename");
+    fs::write(dir.join("render.txt"), b"R").unwrap();
+
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: dir.join("render.txt"),
+        destination: dir.join("RENDER.txt"),
+    });
+
+    // Detect the volume's case sensitivity; only assert the no-conflict
+    // behaviour where it actually applies.
+    let case_insensitive = dir.join("RENDER.txt").exists();
+    let result = plan.commit(false);
+    if case_insensitive {
+        assert!(result.unwrap().success(), "case-only rename wrongly blocked");
+        assert!(dir.join("RENDER.txt").exists());
+    } else {
+        // Case-sensitive: RENDER.txt genuinely does not exist, so it also
+        // commits cleanly (no conflict either way).
+        assert!(result.unwrap().success());
+    }
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn commit_rotates_three_files() {
     let dir = temp_dir("rotate");
     fs::write(dir.join("a"), b"A").unwrap();

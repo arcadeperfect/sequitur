@@ -4,6 +4,34 @@ use std::fs;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+/// Entry-level existence that does **not** traverse symlinks: a dangling
+/// symlink still counts as occupying its path (unlike [`Path::exists`], which
+/// follows the link and reports the missing target as absent). Used for every
+/// "would this clobber something?" check so a broken symlink is never silently
+/// overwritten.
+fn path_exists(p: &Path) -> bool {
+    fs::symlink_metadata(p).is_ok()
+}
+
+/// Whether `a` and `b` are the same filesystem entry — distinguishing a
+/// case-only/hardlink rename (same inode under a different spelling on a
+/// case-insensitive volume) from a rename that would clobber a genuinely
+/// different file. On non-Unix targets this conservatively returns `false`,
+/// so such a rename is reported as a conflict rather than silently allowed.
+#[cfg(unix)]
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file(_a: &Path, _b: &Path) -> bool {
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum FileOperation {
@@ -44,7 +72,7 @@ impl FileOperation {
     }
 
     pub fn would_overwrite(&self) -> bool {
-        self.destination().is_some_and(|d| d.exists())
+        self.destination().is_some_and(path_exists)
     }
 
     /// Performs this operation on the filesystem.
@@ -419,7 +447,21 @@ impl OperationPlan {
         F: FnMut(Progress) -> ControlFlow<()>,
     {
         if !force {
-            let conflicts = self.collect_conflicts(|d| d.exists());
+            let mut conflicts = self.collect_conflicts(path_exists);
+            // A case-only or hardlink rename (`render→RENDER` on a
+            // case-insensitive filesystem) reports its destination as
+            // existing, but renaming there clobbers nothing — it IS the
+            // source entry. Drop any "conflict" that is the same file as an
+            // operation's own freed source.
+            if !conflicts.is_empty() {
+                let freed: Vec<&Path> = self
+                    .operations
+                    .iter()
+                    .filter(|op| op.frees_source())
+                    .map(|op| op.source())
+                    .collect();
+                conflicts.retain(|d| !freed.iter().any(|s| same_file(s, d)));
+            }
             if !conflicts.is_empty() {
                 return Err(SequenceError::Conflict(conflicts));
             }
@@ -437,11 +479,8 @@ impl OperationPlan {
                 operation: &op,
             };
             if observe(progress).is_break() {
-                drain_temps(&mut executed, &mut live_temps);
-                return Ok(ExecutionResult {
-                    executed,
-                    failed: Vec::new(),
-                });
+                let failed = drain_temps(&mut executed, &mut live_temps);
+                return Ok(ExecutionResult { executed, failed });
             }
 
             match op.execute() {
@@ -457,11 +496,9 @@ impl OperationPlan {
                     executed.push(op);
                 }
                 Err(e) => {
-                    drain_temps(&mut executed, &mut live_temps);
-                    return Ok(ExecutionResult {
-                        executed,
-                        failed: vec![(op, e)],
-                    });
+                    let mut failed = vec![(op, e)];
+                    failed.extend(drain_temps(&mut executed, &mut live_temps));
+                    return Ok(ExecutionResult { executed, failed });
                 }
             }
         }
@@ -484,27 +521,50 @@ fn temp_path(source: &Path, known: &HashSet<PathBuf>, counter: &mut usize) -> Pa
     loop {
         let candidate = parent.join(format!(".{name}.sequitur-tmp-{counter}"));
         *counter += 1;
-        if !known.contains(&candidate) && !candidate.exists() {
+        if !known.contains(&candidate) && !path_exists(&candidate) {
             return candidate;
         }
     }
 }
 
 /// Unwinds an interrupted temp cycle: reverses already-executed renames (in
-/// LIFO order) until every live temp path has been moved back, popping the
-/// undone operations out of `executed`.
-fn drain_temps(executed: &mut Vec<FileOperation>, live_temps: &mut Vec<PathBuf>) {
+/// LIFO order) until every live temp path has been moved back, popping each
+/// successfully-undone operation out of `executed`.
+///
+/// Stops at the first operation it cannot or should not reverse — a non-rename
+/// step (which was never part of the temp cycle) or a reverse `rename` that
+/// itself fails (leaving the file stranded at the temp path). Such an
+/// operation is left in `executed` because its on-disk effect persists, and a
+/// failed reversal is returned so the caller can report the stranded path
+/// rather than claiming a clean rollback.
+fn drain_temps(
+    executed: &mut Vec<FileOperation>,
+    live_temps: &mut Vec<PathBuf>,
+) -> Vec<(FileOperation, std::io::Error)> {
+    let mut unwind_failed = Vec::new();
     while !live_temps.is_empty() {
-        let Some(op) = executed.pop() else { break };
-        match &op {
-            FileOperation::Rename { source, destination }
-            | FileOperation::Move { source, destination } => {
-                let _ = fs::rename(destination, source);
-                live_temps.retain(|t| t != destination);
+        let Some(op) = executed.last() else { break };
+        let (FileOperation::Rename { source, destination }
+        | FileOperation::Move { source, destination }) = op
+        else {
+            // Not part of the temp cycle; its effect stands. Stop here.
+            break;
+        };
+        match fs::rename(destination, source) {
+            Ok(()) => {
+                let dest = destination.clone();
+                live_temps.retain(|t| t != &dest);
+                executed.pop();
             }
-            _ => {}
+            Err(e) => {
+                // The file is stranded at `destination`; leave the op in
+                // `executed` (its effect persists) and report the failure.
+                unwind_failed.push((op.clone(), e));
+                break;
+            }
         }
     }
+    unwind_failed
 }
 
 impl Default for OperationPlan {
