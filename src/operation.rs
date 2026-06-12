@@ -340,11 +340,19 @@ impl OperationPlan {
         let mut counter = 0usize;
 
         while !remaining.is_empty() {
-            // An op is runnable when its source exists and its destination is
-            // not still occupied by some other op's live source.
-            let runnable = remaining.iter().position(|op| {
+            // An op is runnable when its source exists, its destination is
+            // not still occupied by some other op's live source, and — if it
+            // vacates its source — no other remaining op still needs to read
+            // that source (a Copy from a path must run before the Rename /
+            // Move / Delete that consumes it).
+            let runnable = remaining.iter().enumerate().position(|(i, op)| {
                 live.contains(op.source())
                     && op.destination().is_none_or(|d| !live.contains(d))
+                    && !(op.frees_source()
+                        && remaining
+                            .iter()
+                            .enumerate()
+                            .any(|(j, other)| j != i && other.source() == op.source()))
             });
 
             if let Some(idx) = runnable {

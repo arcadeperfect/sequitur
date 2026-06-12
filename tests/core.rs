@@ -327,6 +327,61 @@ fn commit_reports_conflict_against_unfreed_destination() {
 }
 
 #[test]
+fn schedule_runs_copies_before_the_source_is_freed() {
+    // Authored order is hostile: the rename would consume `a` before the
+    // copy reads it. The scheduler must run the Copy first.
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: PathBuf::from("/x/a"),
+        destination: PathBuf::from("/x/c"),
+    });
+    plan.push(FileOperation::Copy {
+        source: PathBuf::from("/x/a"),
+        destination: PathBuf::from("/x/b"),
+    });
+
+    let schedule = plan.schedule().unwrap();
+    assert_eq!(schedule.len(), 2);
+    assert!(
+        matches!(schedule[0], FileOperation::Copy { .. }),
+        "copy must run before the rename that frees its source"
+    );
+
+    // On disk: a is both copied to b and renamed to c.
+    let dir = temp_dir("copy_order");
+    fs::write(dir.join("a"), b"A").unwrap();
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: dir.join("a"),
+        destination: dir.join("c"),
+    });
+    plan.push(FileOperation::Copy {
+        source: dir.join("a"),
+        destination: dir.join("b"),
+    });
+    assert!(plan.commit(false).unwrap().success());
+    assert_eq!(fs::read(dir.join("b")).unwrap(), b"A");
+    assert_eq!(fs::read(dir.join("c")).unwrap(), b"A");
+    assert!(!dir.join("a").exists());
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn incoherent_double_consume_is_rejected() {
+    // Two ops both consume `a`: no valid order exists. Must error, not
+    // silently produce a wrong final state.
+    let mut plan = OperationPlan::new();
+    plan.push(FileOperation::Rename {
+        source: PathBuf::from("/x/a"),
+        destination: PathBuf::from("/x/b"),
+    });
+    plan.push(FileOperation::Delete {
+        source: PathBuf::from("/x/a"),
+    });
+    assert!(plan.schedule().is_err());
+}
+
+#[test]
 fn commit_allows_case_only_rename_on_case_insensitive_fs() {
     // On a case-insensitive volume (macOS default) `RENDER.txt` "exists" the
     // moment `render.txt` does — but renaming one to the other clobbers
