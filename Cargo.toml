@@ -15,10 +15,14 @@ path = "src/lib.rs"
 
 [features]
 serde = ["dep:serde"]
+# Route `Delete` through the OS trash/recycle bin instead of unlinking, so
+# deletes are recoverable. Off by default (the lib's default is a hard delete).
+trash = ["dep:trash"]
 
 [dependencies]
 thiserror = "2.0.17"
 serde = { version = "1", features = ["derive"], optional = true }
+trash = { version = "5", optional = true }
 
 [dev-dependencies]
 serde_json = "1"

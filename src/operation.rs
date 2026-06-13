@@ -4,6 +4,18 @@ use std::fs;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+/// Removes `path`. With the `trash` feature it goes to the OS trash/recycle
+/// bin (recoverable); otherwise it is unlinked.
+#[cfg(feature = "trash")]
+fn delete_path(path: &Path) -> std::io::Result<()> {
+    trash::delete(path).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+#[cfg(not(feature = "trash"))]
+fn delete_path(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)
+}
+
 /// Entry-level existence that does **not** traverse symlinks: a dangling
 /// symlink still counts as occupying its path (unlike [`Path::exists`], which
 /// follows the link and reports the missing target as absent). Used for every
@@ -86,7 +98,7 @@ impl FileOperation {
                 fs::rename(source, destination)
             }
             Self::Copy { source, destination } => fs::copy(source, destination).map(|_| ()),
-            Self::Delete { source } => fs::remove_file(source),
+            Self::Delete { source } => delete_path(source),
         }
     }
 
