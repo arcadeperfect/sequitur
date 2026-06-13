@@ -22,9 +22,10 @@ sequitur = { version = "0.2", features = ["serde"] }
 ## Features
 
 - **File Sequence Handling**
-  - Parse and manage frame-based file sequences
-  - Support for various naming conventions and patterns
-  - Handle missing or duplicate frames, inconsistent padding
+  - Parse a directory, or a loose list of paths dropped from several folders (`from_paths`)
+  - Group files into sequences; report unparseable files as rogues
+  - Detect missing frames; split sequences with duplicate or inconsistent padding
+  - Render sequence strings in hash (`render_####.exr`) or printf (`render_%04d.exr`) notation
 
 - **Flexible Component System**
   - Parse filenames into components (prefix, delimiter, frame number, suffix, extension)
@@ -38,6 +39,46 @@ sequitur = { version = "0.2", features = ["serde"] }
 - **Safe by Default**
   - Operations return a plan that can be inspected before execution
   - Conflict detection prevents accidental overwrites
+
+## Usage
+
+```rust
+use sequitur::{Components, FileSequence};
+use std::path::Path;
+
+// Discover sequences in a directory (minimum 2 frames each).
+let sequences = FileSequence::from_directory(Path::new("/renders"), 2)?;
+
+for seq in &sequences {
+    println!(
+        "{}  frames {}-{}",
+        seq.sequence_string()?, // e.g. "render_####.exr"
+        seq.first_frame(),
+        seq.last_frame(),
+    );
+}
+
+// Plan a rename, inspect it, then apply (false = don't overwrite).
+let planned = sequences[0].rename(Components::new().prefix("shot_010"));
+if !planned.plan.has_conflicts() {
+    let renamed = planned.apply(false)?;
+    println!("renamed to {}", renamed.sequence_string()?);
+}
+```
+
+Files dropped from several folders at once can be ingested directly — they're
+grouped by parent directory, and anything without a frame number comes back as
+a rogue:
+
+```rust
+use sequitur::FileSequence;
+use std::path::PathBuf;
+
+let dropped: Vec<PathBuf> = /* paths from a drag-and-drop event */ vec![];
+let result = FileSequence::from_paths(&dropped, 1);
+// result.sequences — the sequences found
+// result.rogues    — paths with no detectable frame number
+```
 
 ## File Naming Convention
 
