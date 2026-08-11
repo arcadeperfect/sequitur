@@ -14,10 +14,22 @@ name = "sequitur"
 path = "src/lib.rs"
 
 [features]
+default = ["execute"]
+# Filesystem mutation: `OperationPlan::{execute, commit, commit_observed}`,
+# `Planned::apply` and `FileOperation::execute`. Build with
+# `default-features = false` for a compile-time read-only crate: every code
+# path that renames, copies, moves or deletes files is compiled out entirely,
+# while parsing, planning, conflict checking, `validate` and `schedule`
+# remain available (dry runs).
+execute = []
 serde = ["dep:serde"]
 # Route `Delete` through the OS trash/recycle bin instead of unlinking, so
 # deletes are recoverable. Off by default (the lib's default is a hard delete).
-trash = ["dep:trash"]
+# Implies `execute` — trashing is a mutation.
+trash = ["execute", "dep:trash"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 thiserror = "2.0.17"

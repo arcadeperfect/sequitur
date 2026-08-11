@@ -19,6 +19,26 @@ Enable the optional `serde` feature to (de)serialize the public types — handy 
 sequitur = { version = "0.2", features = ["serde"] }
 ```
 
+### Read-only builds
+
+For tools that must never touch the files they scan (e.g. running against
+production data), disable default features:
+
+```toml
+sequitur = { version = "0.2", default-features = false }
+```
+
+This removes the `execute` feature, and with it **every code path that
+mutates the filesystem** — `OperationPlan::execute`/`commit`/`commit_observed`,
+`Planned::apply` and `FileOperation::execute` do not exist in the compiled
+crate, so calling them is a compile error rather than a runtime refusal.
+Parsing, grouping, planning, conflict checking, `validate` and `schedule`
+all remain available, so you can still build and display full dry runs.
+`serde` composes with this (`default-features = false, features = ["serde"]`).
+
+The `trash` feature (route deletes through the OS trash instead of
+unlinking) implies `execute`.
+
 ## Features
 
 - **File Sequence Handling**

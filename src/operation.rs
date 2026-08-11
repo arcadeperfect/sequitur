@@ -1,17 +1,18 @@
 use crate::error::SequenceError;
 use std::collections::HashSet;
 use std::fs;
+#[cfg(feature = "execute")]
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 /// Removes `path`. With the `trash` feature it goes to the OS trash/recycle
 /// bin (recoverable); otherwise it is unlinked.
-#[cfg(feature = "trash")]
+#[cfg(all(feature = "execute", feature = "trash"))]
 fn delete_path(path: &Path) -> std::io::Result<()> {
     trash::delete(path).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-#[cfg(not(feature = "trash"))]
+#[cfg(all(feature = "execute", not(feature = "trash")))]
 fn delete_path(path: &Path) -> std::io::Result<()> {
     fs::remove_file(path)
 }
@@ -30,7 +31,7 @@ fn path_exists(p: &Path) -> bool {
 /// case-insensitive volume) from a rename that would clobber a genuinely
 /// different file. On non-Unix targets this conservatively returns `false`,
 /// so such a rename is reported as a conflict rather than silently allowed.
-#[cfg(unix)]
+#[cfg(all(feature = "execute", unix))]
 fn same_file(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (fs::metadata(a), fs::metadata(b)) {
@@ -39,7 +40,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(feature = "execute", not(unix)))]
 fn same_file(_a: &Path, _b: &Path) -> bool {
     false
 }
@@ -92,6 +93,10 @@ impl FileOperation {
     /// `Rename` and `Move` both use [`std::fs::rename`], which does not copy
     /// across filesystems; a cross-device move will surface as an error rather
     /// than panicking (a copy+remove fallback is intentionally left for later).
+    ///
+    /// Requires the `execute` feature (on by default); a
+    /// `default-features = false` build is compile-time read-only.
+    #[cfg(feature = "execute")]
     pub fn execute(&self) -> std::io::Result<()> {
         match self {
             Self::Rename { source, destination } | Self::Move { source, destination } => {
@@ -114,6 +119,7 @@ impl FileOperation {
 }
 
 /// The outcome of executing an [`OperationPlan`].
+#[cfg(feature = "execute")]
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ExecutionResult {
@@ -130,7 +136,7 @@ pub struct ExecutionResult {
 
 /// Serializes the `failed` operations, flattening each [`std::io::Error`] to its
 /// message string (the error type is not serde-serializable on its own).
-#[cfg(feature = "serde")]
+#[cfg(all(feature = "serde", feature = "execute"))]
 fn serialize_failed<S>(
     failed: &[(FileOperation, std::io::Error)],
     serializer: S,
@@ -156,6 +162,7 @@ where
     seq.end()
 }
 
+#[cfg(feature = "execute")]
 impl ExecutionResult {
     /// Returns `true` if every operation succeeded.
     pub fn success(&self) -> bool {
@@ -176,6 +183,7 @@ impl ExecutionResult {
 /// operations. The `operation` borrow lets an observer inspect (or display) the
 /// step about to execute; a temp hop is recognisable by its `sequitur-tmp`
 /// destination.
+#[cfg(feature = "execute")]
 #[derive(Debug, Clone, Copy)]
 pub struct Progress<'a> {
     /// Zero-based index of the step about to run.
@@ -288,6 +296,9 @@ impl OperationPlan {
     /// the offending destinations. Otherwise each operation is attempted and
     /// the per-operation outcomes are collected into an [`ExecutionResult`];
     /// a single failure does not abort the remaining operations.
+    ///
+    /// Requires the `execute` feature (on by default).
+    #[cfg(feature = "execute")]
     pub fn execute(&self, force: bool) -> Result<ExecutionResult, SequenceError> {
         if !force {
             let conflicts: Vec<PathBuf> = self
@@ -444,6 +455,9 @@ impl OperationPlan {
     /// On the first failure, any in-flight temp rename is rolled back so the
     /// filesystem is left without stray `sequitur-tmp` files, and the partial
     /// outcome is returned with the offending operation in `failed`.
+    ///
+    /// Requires the `execute` feature (on by default).
+    #[cfg(feature = "execute")]
     pub fn commit(&self, force: bool) -> Result<ExecutionResult, SequenceError> {
         self.commit_observed(force, |_| ControlFlow::Continue(()))
     }
@@ -458,6 +472,9 @@ impl OperationPlan {
     /// `sequitur-tmp` files remain), and the partial [`ExecutionResult`] is
     /// returned with an empty `failed` list. A genuine I/O error still lands in
     /// `failed` exactly as for [`commit`](OperationPlan::commit).
+    ///
+    /// Requires the `execute` feature (on by default).
+    #[cfg(feature = "execute")]
     pub fn commit_observed<F>(
         &self,
         force: bool,
@@ -557,6 +574,7 @@ fn temp_path(source: &Path, known: &HashSet<PathBuf>, counter: &mut usize) -> Pa
 /// operation is left in `executed` because its on-disk effect persists, and a
 /// failed reversal is returned so the caller can report the stranded path
 /// rather than claiming a clean rollback.
+#[cfg(feature = "execute")]
 fn drain_temps(
     executed: &mut Vec<FileOperation>,
     live_temps: &mut Vec<PathBuf>,
@@ -607,6 +625,9 @@ impl<T> Planned<T> {
     ///
     /// See [`OperationPlan::execute`] for the meaning of `force`. If any
     /// operation fails during execution, the first error is returned.
+    ///
+    /// Requires the `execute` feature (on by default).
+    #[cfg(feature = "execute")]
     pub fn apply(self, force: bool) -> Result<T, SequenceError> {
         let result = self.plan.execute(force)?;
         if let Some((_, err)) = result.failed.into_iter().next() {

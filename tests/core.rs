@@ -178,6 +178,7 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn executes_a_sequence_rename_on_disk() {
     let dir = temp_dir("rename");
@@ -202,6 +203,7 @@ fn executes_a_sequence_rename_on_disk() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn execute_reports_conflict_without_force() {
     let dir = temp_dir("conflict");
@@ -269,6 +271,7 @@ fn schedule_breaks_a_swap_with_a_temp_hop() {
     assert_eq!(schedule[2].source(), first_dest);
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn commit_swaps_two_files_without_data_loss() {
     let dir = temp_dir("swap");
@@ -304,6 +307,7 @@ fn commit_swaps_two_files_without_data_loss() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn commit_reports_conflict_against_unfreed_destination() {
     let dir = temp_dir("commit_conflict");
@@ -326,6 +330,7 @@ fn commit_reports_conflict_against_unfreed_destination() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn schedule_runs_copies_before_the_source_is_freed() {
     // Authored order is hostile: the rename would consume `a` before the
@@ -381,6 +386,7 @@ fn incoherent_double_consume_is_rejected() {
     assert!(plan.schedule().is_err());
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn commit_allows_case_only_rename_on_case_insensitive_fs() {
     // On a case-insensitive volume (macOS default) `RENDER.txt` "exists" the
@@ -411,6 +417,7 @@ fn commit_allows_case_only_rename_on_case_insensitive_fs() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn commit_rotates_three_files() {
     let dir = temp_dir("rotate");
@@ -507,6 +514,7 @@ fn validate_flags_two_ops_targeting_one_destination() {
     assert!(matches!(err, sequitur::SequenceError::Conflict(_)));
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn commit_observed_reports_every_scheduled_step() {
     use std::ops::ControlFlow;
@@ -541,6 +549,7 @@ fn commit_observed_reports_every_scheduled_step() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn commit_observed_cancellation_unwinds_temp_cycle() {
     use std::ops::ControlFlow;

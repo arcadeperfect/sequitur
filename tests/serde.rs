@@ -4,9 +4,10 @@
 #![cfg(feature = "serde")]
 
 use sequitur::{
-    Components, ExecutionResult, FileOperation, FileSequence, Item, OperationPlan, Planned,
-    SequenceError,
+    Components, FileOperation, FileSequence, Item, OperationPlan, Planned, SequenceError,
 };
+#[cfg(feature = "execute")]
+use sequitur::ExecutionResult;
 use std::path::PathBuf;
 
 #[test]
@@ -87,6 +88,7 @@ fn planned_and_operation_plan_serialize() {
     assert!(plan_json.contains("operations"));
 }
 
+#[cfg(feature = "execute")]
 #[test]
 fn execution_result_flattens_io_errors() {
     let op = FileOperation::Delete {
