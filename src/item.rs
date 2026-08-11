@@ -73,6 +73,14 @@ impl Item {
         }
 
         let frame_string = name_part[frame_start..frame_end].to_string();
+
+        // A digit run that doesn't fit an i32 is not a frame number (it's a
+        // timestamp, hash, etc.) -- treat the file as unnumbered rather than
+        // constructing an Item whose frame_number() would panic.
+        if frame_string.parse::<i32>().is_err() {
+            return None;
+        }
+
         let suffix = &name_part[frame_end..];
 
         // Split the text before the frame into prefix + delimiter.

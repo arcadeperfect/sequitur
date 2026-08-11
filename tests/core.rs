@@ -43,6 +43,17 @@ fn parses_suffix_and_no_delimiter() {
 }
 
 #[test]
+fn rejects_digit_runs_that_overflow_i32() {
+    // timestamps / hashes are not frame numbers; constructing an Item from
+    // them would make frame_number() panic (PosOverflow)
+    assert!(Item::from_filename("IMG_20260810143022.jpg", None).is_none());
+    assert!(Item::from_filename("render_9999999999.exr", None).is_none());
+    // 10 digits that DO fit still parse
+    let ok = Item::from_filename("x_2000000000.exr", None).unwrap();
+    assert_eq!(ok.frame_number(), 2_000_000_000);
+}
+
+#[test]
 fn multi_char_delimiter_folds_into_prefix() {
     let item = Item::from_filename("name__001.exr", None).unwrap();
     assert_eq!(item.prefix(), "name_");
