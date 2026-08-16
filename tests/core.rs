@@ -905,6 +905,35 @@ fn offset_frames_zero_is_noop() {
     assert_eq!(planned.proposed.existing_frames(), vec![1, 2]);
 }
 
+// A local file trashes; a network share has no Recycle Bin to trash into, so
+// `trash_available` flags the delete as permanent before it happens. UNC
+// detection must not catch verbatim *local* paths, which trash fine.
+#[cfg(feature = "trash")]
+#[test]
+fn trash_available_flags_network_paths() {
+    let dir = temp_dir("trash_probe");
+    let file = dir.join("a_001.exr");
+    fs::write(&file, b"x").unwrap();
+    assert!(sequitur::trash_available(&file));
+
+    #[cfg(windows)]
+    {
+        // Nothing needs to exist: canonicalization fails and the literal
+        // spelling is tested instead.
+        assert!(!sequitur::trash_available(&PathBuf::from(
+            r"\\server\share\seq\a_001.exr"
+        )));
+        assert!(!sequitur::trash_available(&PathBuf::from(
+            r"\\?\UNC\server\share\seq\a_001.exr"
+        )));
+        assert!(sequitur::trash_available(&PathBuf::from(
+            r"\\?\C:\seq\a_001.exr"
+        )));
+    }
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn offset_frames_rejects_negative_result() {
     let seq = &FileSequence::from_filenames(&["a_001.exr", "a_002.exr"], 2, None)[0];

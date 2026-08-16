@@ -5,10 +5,50 @@ use std::fs;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+/// Whether deleting `path` can go to the OS trash/recycle bin — i.e. whether
+/// the delete would be recoverable.
+///
+/// Windows keeps no Recycle Bin on network shares, so [`trash::delete`] fails
+/// there with `ERROR_FILE_NOT_FOUND` (0x80070002) however the path is spelled —
+/// `\\server\share\…` and `\\?\UNC\server\share\…` alike. Mapped network drives
+/// (`T:\…`) are the same store behind a drive letter, so resolve the path first:
+/// canonicalization rewrites them into their `\\?\UNC\` form, which the UNC test
+/// then catches. A verbatim *local* path (`\\?\C:\…`) trashes fine and must not
+/// be mistaken for a share.
+///
+/// Callers should warn before deleting where this returns `false`: the delete
+/// still goes through (see [`FileOperation::execute`]), but it is permanent.
+#[cfg(all(feature = "trash", windows))]
+pub fn trash_available(path: &Path) -> bool {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let s = resolved.as_os_str().to_string_lossy();
+    let unc = s.starts_with(r"\\?\UNC\") || (s.starts_with(r"\\") && !s.starts_with(r"\\?\"));
+    !unc
+}
+
+/// Non-Windows platforms trash uniformly, including on mounted network volumes.
+#[cfg(all(feature = "trash", not(windows)))]
+pub fn trash_available(_path: &Path) -> bool {
+    true
+}
+
+/// Without the `trash` feature every delete is a hard unlink, so no delete is
+/// ever recoverable.
+#[cfg(not(feature = "trash"))]
+pub fn trash_available(_path: &Path) -> bool {
+    false
+}
+
 /// Removes `path`. With the `trash` feature it goes to the OS trash/recycle
 /// bin (recoverable); otherwise it is unlinked.
 #[cfg(all(feature = "execute", feature = "trash"))]
 fn delete_path(path: &Path) -> std::io::Result<()> {
+    // Where there is no trash to route through (a network share on Windows),
+    // unlink rather than failing the whole operation. This is not recoverable,
+    // which is why `trash_available` is public for callers to warn on first.
+    if !trash_available(path) {
+        return fs::remove_file(path);
+    }
     trash::delete(path).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
