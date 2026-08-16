@@ -287,10 +287,57 @@ impl FileSequence {
     pub fn existing_frames(&self) -> Vec<i32> {
         self.items.iter().map(|i| i.frame_number()).collect()
     }
+    /// Frame numbers absent from `first_frame..=last_frame`.
+    ///
+    /// Walks the sorted items and emits each gap, so cost is O(items + gaps)
+    /// rather than O(span). Callers rendering a UI should prefer
+    /// [`missing_frame_count`](Self::missing_frame_count) or
+    /// [`missing_frames_capped`](Self::missing_frames_capped): a "sequence"
+    /// of date-stamped photos (`IMG_20240815`, `IMG_20260113`) has a span of
+    /// millions, and materialising every gap is an allocation the size of the
+    /// span.
     pub fn missing_frames(&self) -> Vec<i32> {
-        let range = self.first_frame()..=self.last_frame();
-        let existing_frames: HashSet<i32> = self.existing_frames().into_iter().collect();
-        range.filter(|f| !existing_frames.contains(f)).collect()
+        self.missing_frames_capped(usize::MAX)
+    }
+
+    /// Like [`missing_frames`](Self::missing_frames) but stops after `limit`
+    /// gaps. Use for display; pair with
+    /// [`missing_frame_count`](Self::missing_frame_count) for the total.
+    pub fn missing_frames_capped(&self, limit: usize) -> Vec<i32> {
+        let mut out = Vec::new();
+        if limit == 0 {
+            return out;
+        }
+        // Sort a local copy rather than rely on item ordering, so this stays
+        // correct however the sequence was built. Duplicates (padding variants
+        // of one frame) collapse naturally in the gap walk.
+        let mut frames = self.existing_frames();
+        frames.sort_unstable();
+        let mut prev: Option<i32> = None;
+        for f in frames {
+            if let Some(p) = prev {
+                let mut g = p.saturating_add(1);
+                while g < f {
+                    out.push(g);
+                    if out.len() >= limit {
+                        return out;
+                    }
+                    g += 1;
+                }
+            }
+            prev = Some(f);
+        }
+        out
+    }
+
+    /// Number of frames absent from `first_frame..=last_frame`, computed
+    /// without materialising them: `span - distinct existing frames`.
+    pub fn missing_frame_count(&self) -> u64 {
+        let mut frames = self.existing_frames();
+        frames.sort_unstable();
+        frames.dedup();
+        let span = (self.last_frame() as i64 - self.first_frame() as i64 + 1).max(0) as u64;
+        span.saturating_sub(frames.len() as u64)
     }
     pub fn prefix(&self) -> Result<&str, SequenceError> {
         let first = self.items.first().unwrap().prefix();

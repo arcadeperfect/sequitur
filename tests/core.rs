@@ -135,6 +135,27 @@ fn missing_frames_detected() {
     let seqs = FileSequence::from_filenames(&files, 2, None);
     assert_eq!(seqs.len(), 1);
     assert_eq!(seqs[0].missing_frames(), vec![3]);
+    assert_eq!(seqs[0].missing_frame_count(), 1);
+    assert_eq!(seqs[0].missing_frames_capped(0), Vec::<i32>::new());
+    assert_eq!(seqs[0].missing_frames_capped(1), vec![3]);
+}
+
+/// Date-stamped photos parse as a "sequence" with a span of millions. Gap
+/// reporting must scale with the number of files/gaps requested, never with
+/// the numeric span — the old dense implementation allocated a vec the size
+/// of the span and froze the app.
+#[test]
+fn missing_frames_huge_sparse_span_is_cheap() {
+    let files = ["IMG_20240815.jpg", "IMG_20260113.jpg"];
+    let seqs = FileSequence::from_filenames(&files, 2, None);
+    assert_eq!(seqs.len(), 1);
+    let seq = &seqs[0];
+    let expected = (20_260_113u64 - 20_240_815) - 1; // span minus the two present frames
+    let t = std::time::Instant::now();
+    assert_eq!(seq.missing_frame_count(), expected);
+    let capped = seq.missing_frames_capped(5);
+    assert!(t.elapsed().as_millis() < 50, "took {:?}", t.elapsed());
+    assert_eq!(capped, vec![20_240_816, 20_240_817, 20_240_818, 20_240_819, 20_240_820]);
 }
 
 #[test]
