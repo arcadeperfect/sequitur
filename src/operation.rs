@@ -39,22 +39,28 @@ pub fn trash_available(_path: &Path) -> bool {
     false
 }
 
-/// Removes `path`. With the `trash` feature it goes to the OS trash/recycle
-/// bin (recoverable); otherwise it is unlinked.
-#[cfg(all(feature = "execute", feature = "trash"))]
-fn delete_path(path: &Path) -> std::io::Result<()> {
-    // Where there is no trash to route through (a network share on Windows),
-    // unlink rather than failing the whole operation. This is not recoverable,
-    // which is why `trash_available` is public for callers to warn on first.
-    if !trash_available(path) {
-        return fs::remove_file(path);
+/// Removes `path`, optionally routing through the OS trash/recycle bin.
+///
+/// `to_trash` *requests* a recoverable delete; it degrades to an unlink where
+/// no trash is available for that path (a network share on Windows — see
+/// [`trash_available`]) or when the `trash` feature is off, rather than
+/// failing the operation. `to_trash = false` always unlinks: permanent, and
+/// the caller is expected to have confirmed that with the user.
+#[cfg(feature = "execute")]
+pub fn delete_file(path: &Path, to_trash: bool) -> std::io::Result<()> {
+    #[cfg(feature = "trash")]
+    if to_trash && trash_available(path) {
+        return trash::delete(path).map_err(|e| std::io::Error::other(e.to_string()));
     }
-    trash::delete(path).map_err(|e| std::io::Error::other(e.to_string()))
+    let _ = to_trash; // unused without the `trash` feature
+    fs::remove_file(path)
 }
 
-#[cfg(all(feature = "execute", not(feature = "trash")))]
+/// Removes `path` the way a committed [`FileOperation::Delete`] does: through
+/// the trash where one is available, otherwise an unlink.
+#[cfg(feature = "execute")]
 fn delete_path(path: &Path) -> std::io::Result<()> {
-    fs::remove_file(path)
+    delete_file(path, true)
 }
 
 /// Entry-level existence that does **not** traverse symlinks: a dangling

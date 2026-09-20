@@ -9,5 +9,5 @@ pub use error::SequenceError;
 pub use item::Item;
 pub use operation::{trash_available, FileOperation, OperationPlan, Planned};
 #[cfg(feature = "execute")]
-pub use operation::{ExecutionResult, Progress};
+pub use operation::{delete_file, ExecutionResult, Progress};
 pub use sequence::{DirEntry, DirectoryListing, EntryKind, FileSequence, ParseResult};
