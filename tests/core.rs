@@ -129,6 +129,34 @@ fn groups_into_sequences() {
     assert!(render.missing_frames().is_empty());
 }
 
+/// `delete_file(_, false)` must really unlink — the app offers it as the
+/// explicit "permanent" choice, so it must not quietly route through the
+/// trash (where the file would still exist, just elsewhere).
+#[test]
+fn delete_file_permanent_unlinks() {
+    let dir = std::env::temp_dir().join(format!(
+        "sequitur_del_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("doomed.exr");
+    fs::write(&f, b"x").unwrap();
+    assert!(f.exists());
+
+    sequitur::delete_file(&f, false).unwrap();
+    assert!(!f.exists(), "permanent delete left the file behind");
+
+    // Deleting what is already gone is an error the caller can report, not a
+    // panic or a silent success.
+    assert!(sequitur::delete_file(&f, false).is_err());
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn missing_frames_detected() {
     let files = ["seq_001.exr", "seq_002.exr", "seq_004.exr"];
